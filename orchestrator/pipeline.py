@@ -5,6 +5,7 @@ Deterministic, testable, in-process pipeline runner composing Modules 04-08.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -19,6 +20,8 @@ from core.schemas.verification import CheckResult, VerificationResult
 
 from orchestrator.sop_executor import PipelineState, SOPExecutor, make_step
 
+
+logger = logging.getLogger(__name__)
 
 # Agent Protocols (for dependency injection / mocking)
 
@@ -170,6 +173,8 @@ class Pipeline:
         if not self._prompt_engineer:
             state.add_error("Prompt engineer not configured")
             return state
+          
+        logger.info(f"User intput: {state.user_input}")
         prompt_spec, tool_plan = self._prompt_engineer.run(state.user_input)
         if self.config.strict_mode:
             if not prompt_spec.extra.get("strict_mode", False):

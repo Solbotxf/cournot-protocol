@@ -1,12 +1,10 @@
 """
 Module 09C - CLI Run Command (Production)
 
-Execute the full pipeline and optionally save an artifact pack.
+Execute the full pipeline using the real agents from agents/ package.
 
 Usage:
     cournot run "<query>" --out pack.zip
-
-Requires agents to be configured via cournot.json or environment variables.
 """
 
 from __future__ import annotations
@@ -17,18 +15,18 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from cournot_cli.config import CLIConfig
-from cournot_cli.agents import (
-    load_all_agents,
-    AgentNotConfiguredError,
-    AgentLoadError,
-    LocalSentinel,
-)
 
-from orchestrator.pipeline import Pipeline, PipelineConfig, RunResult, PoRPackage
-from orchestrator.artifacts.io import save_pack
+# Type checking imports (not executed at runtime)
+if TYPE_CHECKING:
+    from agents.prompt_engineer import PromptEngineerAgent
+    from agents.collector import CollectorAgent, CollectorConfig
+    from agents.auditor import AuditorAgent
+    from agents.judge import JudgeAgent
+    from agents.validator import SentinelAgent, PoRPackage
+    from orchestrator.pipeline import Pipeline, PipelineConfig, RunResult
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +65,81 @@ class RunSummary:
         return d
 
 
+def _import_agents():
+    """Import agents lazily to allow CLI to work without agents installed."""
+    try:
+        from agents.prompt_engineer import PromptEngineerAgent
+        from agents.collector import CollectorAgent, CollectorConfig
+        from agents.auditor import AuditorAgent
+        from agents.judge import JudgeAgent
+        from agents.validator import SentinelAgent, PoRPackage
+        from orchestrator.pipeline import Pipeline, PipelineConfig, RunResult
+        from orchestrator.artifacts.io import save_pack
+        
+        return {
+            "PromptEngineerAgent": PromptEngineerAgent,
+            "CollectorAgent": CollectorAgent,
+            "CollectorConfig": CollectorConfig,
+            "AuditorAgent": AuditorAgent,
+            "JudgeAgent": JudgeAgent,
+            "SentinelAgent": SentinelAgent,
+            "PoRPackage": PoRPackage,
+            "Pipeline": Pipeline,
+            "PipelineConfig": PipelineConfig,
+            "RunResult": RunResult,
+            "save_pack": save_pack,
+        }
+    except ImportError as e:
+        raise ImportError(
+            f"Could not import agents package: {e}\n"
+            "The 'run' command requires the agents package to be installed.\n"
+            "Make sure the agents/ directory is in your PYTHONPATH."
+        ) from e
+
+
+def create_agents(config: CLIConfig) -> dict[str, Any]:
+    """
+    Create all pipeline agents using the real implementations.
+    
+    Args:
+        config: CLI configuration
+    
+    Returns:
+        Dictionary of agent instances
+    """
+    modules = _import_agents()
+    
+    # Create Prompt Engineer
+    prompt_engineer = modules["PromptEngineerAgent"]()
+    
+    # Create Collector with configuration
+    collector_config = modules["CollectorConfig"](
+        default_timeout_s=config.collector.default_timeout_s,
+        strict_tier_policy=config.collector.strict_tier_policy,
+        include_timestamps=config.collector.include_timestamps,
+        collector_id=config.collector.collector_id,
+    )
+    collector = modules["CollectorAgent"](config=collector_config)
+    
+    # Create Auditor
+    auditor = modules["AuditorAgent"]()
+    
+    # Create Judge
+    judge = modules["JudgeAgent"](require_strict_mode=config.strict_mode)
+    
+    # Create Sentinel (optional)
+    sentinel = modules["SentinelAgent"](strict_mode=config.strict_mode) if config.enable_sentinel else None
+    
+    return {
+        "prompt_engineer": prompt_engineer,
+        "collector": collector,
+        "auditor": auditor,
+        "judge": judge,
+        "sentinel": sentinel,
+        "_modules": modules,  # Keep reference for later use
+    }
+
+
 def run_pipeline(
     query: str,
     config: CLIConfig,
@@ -74,56 +147,43 @@ def run_pipeline(
     strict: bool | None = None,
     enable_sentinel: bool = True,
     replay_mode: bool = False,
-) -> tuple[RunResult, PoRPackage | None]:
+) -> tuple[Any, Any]:
     """
     Execute the pipeline with the given query.
     
     Args:
         query: The prediction market query
-        config: CLI configuration with agent settings
+        config: CLI configuration
         strict: Override strict mode (None = use config)
         enable_sentinel: Whether to enable sentinel verification
         replay_mode: Whether to enable replay mode
     
     Returns:
         Tuple of (RunResult, PoRPackage or None)
-    
-    Raises:
-        AgentNotConfiguredError: If required agents are not configured
     """
-    # Load agents from configuration
-    logger.info("Loading agents from configuration...")
-    agents = load_all_agents(config.agents)
+    logger.info("Creating agents...")
+    agents = create_agents(config)
+    modules = agents["_modules"]
     
     # Determine strict mode
     if strict is None:
         strict = config.strict_mode
     
     # Create pipeline configuration
-    pipeline_config = PipelineConfig(
+    pipeline_config = modules["PipelineConfig"](
         strict_mode=strict,
-        enable_sentinel_verify=enable_sentinel,
+        enable_sentinel_verify=enable_sentinel and config.enable_sentinel,
         enable_replay=replay_mode,
     )
     
-    # Get sentinel (use local if not configured but enabled)
-    sentinel = None
-    if enable_sentinel:
-        if "sentinel" in agents:
-            sentinel = agents["sentinel"]
-        else:
-            # Fall back to local sentinel
-            logger.info("Using local sentinel verification")
-            sentinel = LocalSentinel()
-    
-    # Create pipeline
-    pipeline = Pipeline(
+    # Create pipeline with real agents
+    pipeline = modules["Pipeline"](
         config=pipeline_config,
         prompt_engineer=agents["prompt_engineer"],
         collector=agents["collector"],
         auditor=agents["auditor"],
         judge=agents["judge"],
-        sentinel=sentinel,
+        sentinel=agents["sentinel"] if enable_sentinel else None,
     )
     
     # Run pipeline
@@ -133,7 +193,7 @@ def run_pipeline(
     # Build PoRPackage for saving
     package = None
     if result.por_bundle is not None:
-        package = PoRPackage(
+        package = modules["PoRPackage"](
             bundle=result.por_bundle,
             prompt_spec=result.prompt_spec,
             tool_plan=result.tool_plan,
@@ -145,7 +205,7 @@ def run_pipeline(
     return result, package
 
 
-def build_summary(result: RunResult, saved_to: str | None = None, debug: bool = False) -> RunSummary:
+def build_summary(result: Any, saved_to: str | None = None, debug: bool = False) -> RunSummary:
     """Build a RunSummary from pipeline result."""
     summary = RunSummary(
         market_id=result.market_id or "",
@@ -236,12 +296,8 @@ def run_cmd(args: Namespace) -> int:
             enable_sentinel=enable_sentinel,
             replay_mode=replay_mode,
         )
-    except AgentNotConfiguredError as e:
-        print(f"Agent configuration error:\n{e}", file=sys.stderr)
-        print("\nRun 'cournot config --init' to create a configuration file.", file=sys.stderr)
-        return EXIT_RUNTIME_ERROR
-    except AgentLoadError as e:
-        print(f"Agent error: {e}", file=sys.stderr)
+    except ImportError as e:
+        print(f"Import error: {e}", file=sys.stderr)
         return EXIT_RUNTIME_ERROR
     except Exception as e:
         if debug:
@@ -253,7 +309,8 @@ def run_cmd(args: Namespace) -> int:
     saved_to = None
     if out_path and package:
         try:
-            save_path = save_pack(package, out_path)
+            modules = _import_agents()
+            save_path = modules["save_pack"](package, out_path)
             saved_to = str(save_path)
             logger.info(f"Saved artifact pack to: {saved_to}")
         except Exception as e:

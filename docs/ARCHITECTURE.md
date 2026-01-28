@@ -1,623 +1,376 @@
-# Cournot Protocol — AI Oracle Verification Layer (Implementation Design Doc)
-
-## Project Summary
-
-### Goal
-Build an oracle-grade, multi-agent resolution engine for long-tail prediction markets using Proof of Reasoning (PoR):
-- Collector: fetches evidence + provenance proof (zkTLS or tiered proof)
-- Auditor: performs transparent reasoning over evidence and produces a Merkle-ized reasoning trace
-- Judge: enforces deterministic, schema-locked output suitable for on-chain settlement
-Then provide a Fast Path execution (TEE Anchor) and Slow Path verification (Sentinel challengers) model.  ￼
-
-Your current repo already contains:
-
--	core/merkle_tree.py, core/proof_of_reasoning.py, core/schemas.py, core/llm.py
--	role agents in agents/collector, agents/auditor, agents/judge
--	orchestrator/pipeline.py, orchestrator/prompt_engineer.py, orchestrator/market_resolver.py
--	validation/polymarket_validator.py
-
-This doc proposes a structure that (a) matches the whitepaper SOP, (b) cleanly separates “AI role code” from “protocol verification code”, and (c) is modular enough for multiple AIs to implement components independently.
-
-## Core Design Principles
-1.	Role purity: each agent role (Prompt Engineer, Collector, Auditor, Judge, Validator) has a narrow, testable contract.
-2.	Typed, deterministic IO: all cross-module messages use strict schemas (Pydantic) and stable serialization.
-3.	Evidence-first: the Auditor is not allowed to reason unless evidence objects are present and validated.
-4.	Merkle anchoring: every SOP step emits a leaf commitment; the pipeline commits a root that can be “pinpoint challenged”.
-5.	Pluggable verification tiers: zkTLS when possible, otherwise allow tiered proofs (signed API receipts, timestamped snapshots, etc.) with explicit confidence.
-6. Separation of concerns:
-  - AI orchestration (prompts, LLM calls, tools) ≠ verification (Merkle, signatures, re-execution)
-  - market resolution policy (rules, time windows) ≠ data collection (sources)
-7.	Production readiness: observability, reproducibility, and adversarial testing are first-class.
-
-
-## Proposed Repository Structure
-cournot-protocol
-├── ARCHITECTURE.md
-├── core
-│   ├── crypto
-│   │   ├── __init__.py
-│   │   ├── signatures.py
-│   │   ├── attestation.py
-│   │   └── hashing.py
-│   ├── llm
-│   │   ├── determinism.py
-│   │   ├── __init__.py
-│   │   └── llm.py
-│   ├── merkle
-│   │   ├── __init__.py
-│   │   ├── merkle_tree.py
-│   │   └── merkle_proofs.py
-│   ├── schemas
-│   │   ├── verification.py
-│   │   ├── transport.py
-│   │   ├── market.py
-│   │   ├── __init__.py
-│   │   ├── prompts.py
-│   │   ├── canonical.py
-│   │   ├── versioning.py
-│   │   ├── errors.py
-│   │   ├── evidence.py
-│   │   └── verdict.py
-│   ├── por
-│   │   ├── por_bundle.py
-│   │   ├── reasoning_trace.py
-│   │   ├── proof_of_reasoning.py
-│   │   └── __init__.py
-│   └── interfaces
-│       ├── attester.py
-│       ├── llm_provider.py
-│       └── source.py
-├── requirements.txt
-├── config
-│   └── prompts
-│       ├── auditor_prompts.yaml
-│       ├── judge_prompts.yaml
-│       ├── orchestrator_prompts.yaml
-│       └── collector_prompts.yaml
-├── tests
-│   ├── unit
-│   │   └── test_canonical_json.py
-│   └── README.md
-├── agents
-│   ├── validator
-│   │   ├── __init__.py
-│   │   ├── replay_executor.py
-│   │   ├── sentinel_agent.py
-│   │   └── challenges.py
-│   ├── base_agent.py
-│   ├── collector
-│   │   ├── collector_agent.py
-│   │   ├── __init__.py
-│   │   ├── verification
-│   │   │   ├── signature_verifier.py
-│   │   │   ├── __init__.py
-│   │   │   ├── zktls_verifier.py
-│   │   │   └── tier_policy.py
-│   │   └── data_sources
-│   │       ├── polymarket_source.py
-│   │       ├── __init__.py
-│   │       ├── web_source.py
-│   │       ├── http_source.py
-│   │       └── base_source.py
-│   ├── __init__.py
-│   ├── judge
-│   │   ├── judge_agent.py
-│   │   ├── __init__.py
-│   │   └── verification
-│   │       ├── __init__.py
-│   │       ├── deterministic_mapping.py
-│   │       └── schema_lock.py
-│   ├── prompt_engineer
-│   │   ├── __init__.py
-│   │   └── prompt_agent.py
-│   └── auditor
-│       ├── __init__.py
-│       ├── reasoning
-│       │   ├── dspy_programs.py
-│       │   ├── contradiction_checks.py
-│       │   ├── __init__.py
-│       │   └── claim_extraction.py
-│       ├── auditor_agent.py
-│       └── verification
-│           ├── trace_policy.py
-│           ├── __init__.py
-│           └── logic_sanity.py
-├── docs
-│   └── modules
-│       └── Schemas_Canonicalization.md
-├── README.md
-└── orchestrator
-    ├── market_resolver.py
-    ├── prompt_engineer.py
-    ├── __init__.py
-    ├── sop_executor.py
-    └── pipeline.py
-
-
-## System Roles & Responsibilities (SOP)
-
-This is the canonical SOP you should implement (and enforce in sop_executor.py).
-
-4.1 Prompt Engineer (Pre-SOP Gate)
-
-Purpose: convert user free-text into a structured PromptSpec and MarketSpec that is unambiguous and executable.
-
-Outputs
-	•	MarketSpec: event definition, timezone, deadline, resolution source policy
-	•	PromptSpec: final “structured prompt” given to downstream agents
-	•	ToolPlan: what evidence is required, from which sources, with which verification tier
-	•	VerdictRules: how to map evidence → verdict (YES/NO/INVALID)
-
-Failure Modes
-	•	ambiguous event semantics
-	•	missing time window
-	•	missing objective resolution criteria
-	•	non-verifiable sources requested
-
-⸻
-
-4.2 Collector (Stage 1: Proof of Authenticity)
-
-Purpose: fetch evidence and attach provenance proofs.
-
-Outputs
-	•	EvidenceBundle with multiple EvidenceItem
-	•	Each EvidenceItem includes:
-	•	content (raw or normalized)
-	•	source_descriptor (URL/API/server identity)
-	•	provenance_proof (zkTLS proof / signed receipt / hash+timestamp)
-	•	retrieval_receipt (time, method, tool logs)
-
-Tiered Verification Policy
-	•	Tier 0: zkTLS proof (best)
-	•	Tier 1: server signature / API signed response
-	•	Tier 2: notarized snapshot (hash in public log)
-	•	Tier 3: plain HTTP fetch (allowed only if policy permits; low confidence)
-
-Collector must declare confidence and tier per item; downstream logic can require minimum tiers.
-
-⸻
-
-4.3 Auditor (Stage 2: Proof of Logic)
-
-Purpose: interpret evidence, extract claims, resolve contradictions, and produce a ReasoningTrace that can be Merkle-committed.
-
-Outputs
-	•	ReasoningTrace = ordered steps with:
-	•	inputs referenced by evidence IDs
-	•	intermediate claims
-	•	checks performed (freshness, contradiction, source tier constraints)
-	•	final analysis artifact (still not the on-chain verdict)
-	•	LogicReport: summary + list of assumptions (should be minimized)
-
-Constraints
-	•	Must be deterministic or “replayable” under a fixed decoding policy.
-	•	Must never introduce evidence not in EvidenceBundle.
-
-⸻
-
-4.4 Judge (Stage 3: Proof of Determinism)
-
-Purpose: map analysis → DeterministicVerdict with schema-locking.
-
-Outputs
-	•	DeterministicVerdict:
-	•	outcome ∈ {YES, NO, INVALID}
-	•	confidence (bounded numeric)
-	•	justification_hash (points to reasoning root or selected leaf set)
-	•	market_id, resolution_time
-	•	resolution_rule_id (which rule triggered)
-
-Constraints
-	•	schema locked decoding (Outlines/logit-locking style)
-	•	reject ambiguous outputs
-	•	ensure single canonical serialization
-
-⸻
-
-4.5 Sentinel / Validator (Slow Path)
-
-Purpose: verify the PoR bundle:
-	•	authenticity proofs are valid
-	•	reasoning trace is consistent (no “leaf contradiction”)
-	•	verdict schema compliance
-	•	optionally re-execute deterministic reasoning module (opML-like replay)
-
-Outputs
-	•	VerificationResult (pass/fail + challenged leaf index)
-	•	ChallengeBundle for on-chain dispute (future)
-
-⸻
-
-## Canonical Data Model (AI-Friendly Schemas)
-
-Implement all of these as Pydantic models in core/schemas/*. These are the “API contracts” between modules.
-
-5.1 MarketSpec
-
-Fields:
-	•	market_id: str
-	•	question: str
-	•	event_definition: str (must be fully explicit)
-	•	timezone: str
-	•	resolution_deadline: datetime
-	•	resolution_window: {start, end}
-	•	resolution_rules: ResolutionRules
-	•	allowed_sources: list[SourcePolicy]
-	•	min_provenance_tier: int
-	•	dispute_policy: DisputePolicy
-
-5.2 PromptSpec (Structured Prompt)
-
-Fields:
-	•	task_type: "prediction_resolution" | ...
-	•	market: MarketSpec
-	•	prediction_semantics: {target_entity, predicate, threshold, timeframe}
-	•	data_requirements: list[DataRequirement]
-	•	output_schema: str (reference to DeterministicVerdict schema)
-	•	forbidden_behaviors: list[str] (no hallucinated evidence, etc.)
-
-5.3 EvidenceBundle
-	•	bundle_id
-	•	items: list[EvidenceItem]
-	•	collection_time
-	•	collector_id
-	•	provenance_summary
-
-Each EvidenceItem:
-	•	evidence_id
-	•	source: SourceDescriptor
-	•	retrieval: RetrievalReceipt
-	•	provenance: ProvenanceProof
-	•	content_type
-	•	content (raw text/json)
-	•	normalized (optional)
-
-5.4 ReasoningTrace
-	•	trace_id
-	•	steps: list[ReasoningStep]
-	•	policy: TracePolicy (determinism + constraints)
-	•	evidence_refs: list[evidence_id]
-
-ReasoningStep includes:
-	•	step_id
-	•	type: "search" | "extract" | "check" | "deduce" | "aggregate" | ...
-	•	inputs: {evidence_ids, prior_step_ids}
-	•	action
-	•	output
-	•	hash_commitment
-
-5.5 PoRBundle (Protocol Artifact)
-	•	market_id
-	•	prompt_spec_hash
-	•	evidence_root
-	•	reasoning_root
-	•	verdict: DeterministicVerdict
-	•	tee_attestation (fast path, optional)
-	•	signatures: {collector_sig, auditor_sig, judge_sig, anchor_sig}
-
-
-## Merkleization & Commit Rules
-
-6.1 Leaf Strategy
-
-Each SOP stage emits leaves:
-	•	Leaf[0..n] for Collector evidence receipts (or evidence commitments)
-	•	Leaf[...] for Auditor reasoning steps
-	•	Leaf[...] for Judge verdict mapping
-
-Leaf hash should be computed from canonical JSON:
-	•	stable key ordering
-	•	stable numeric encoding
-	•	explicit version field
-
-6.2 Roots
-	•	evidence_root = MerkleRoot(hash(EvidenceItem_i))
-	•	reasoning_root = MerkleRoot(hash(ReasoningStep_j))
-	•	optionally por_root = MerkleRoot([evidence_root, reasoning_root, hash(verdict)])
-
-Pinpoint Verification
-	•	allow proving any step with a Merkle branch:
-	•	“Step k contradicts Evidence i”
-	•	“Timestamp policy violated”
-	•	“Judge produced invalid schema mapping”
-
-## Orchestrator Pipeline (End-to-End Call Graph)
-
-7.1 Fast Path (TEE Anchor Execution)
-
-orchestrator/pipeline.py should implement:
-	1.	PromptEngineerAgent.run(user_input) -> PromptSpec + MarketSpec + ToolPlan
-	2.	CollectorAgent.collect(tool_plan) -> EvidenceBundle
-	3.	CollectorVerifier.verify(evidence_bundle) -> EvidenceVerification
-	4.	AuditorAgent.reason(prompt_spec, evidence_bundle) -> ReasoningTrace
-	5.	AuditorVerifier.verify(trace, evidence_bundle) -> LogicVerification
-	6.	JudgeAgent.judge(prompt_spec, trace) -> DeterministicVerdict
-	7.	JudgeVerifier.verify(verdict) -> SchemaVerification
-	8.	PoRBuilder.build(...) -> PoRBundle
-	9.	AnchorAttestation.sign(por_bundle) -> attested PoRBundle
-	10.	MarketResolver.finalize(market_id, verdict, por_root) -> settlement payload
-
-7.2 Slow Path (Sentinel Verification)
-
-agents/validator/sentinel_agent.py implements:
-	•	verify_authenticity(evidence_bundle)
-	•	verify_logic(reasoning_trace, evidence_bundle)
-	•	verify_determinism(verdict)
-	•	challenge(leaf_ref) if failed
-
-⸻
-
-## Module-by-Module Implementation Specs (Hand-off Friendly)
-
-Each section below is written so a separate AI engineer can implement it independently.
-
-⸻
-
-8.1 core/schemas/* (Contracts Layer)
-
-Owner AI: “Schema Engineer”
-Purpose: define all Pydantic models + canonical serialization rules.
-
-Deliverables
-	•	Pydantic models listed in Section 5
-	•	to_canonical_json() helper for every model
-	•	versioning strategy: schema_version: "v1"
-
-Tests
-	•	round-trip serialize/deserialize
-	•	canonical JSON stable ordering snapshot tests
-
-⸻
-
-8.2 core/por/* (PoR Bundle + Trace Rules)
-
-Owner AI: “Protocol Engineer”
-Purpose: build PoRBundle, compute roots, validate leaf structure.
-
-Key APIs
-	•	compute_leaf_hash(obj) -> bytes32
-	•	build_evidence_root(bundle) -> bytes32
-	•	build_reasoning_root(trace) -> bytes32
-	•	build_por_bundle(...) -> PoRBundle
-	•	verify_por_bundle(bundle) -> VerificationResult
-
-Tests
-	•	deterministic root computation
-	•	tampering tests: modify one step → root mismatch
-
-
-8.3 agents/prompt_engineer/prompt_agent.py
-
-Owner AI: “Prompt Architect”
-Purpose: convert user input to PromptSpec + ToolPlan.
-
-Inputs
-	•	raw user text
-	•	optional market template (Polymarket-like, or your own)
-
-Outputs
-	•	PromptSpec
-	•	ToolPlan with explicit sources + constraints
-
-Policies
-	•	enforce: timeframe, timezone, disambiguation, objective resolution rule
-	•	produce a “prompt bundle” referencing config YAML prompts
-
-Tests
-	•	ambiguous input → returns INVALID with missing_fields list
-	•	consistent structured prompt for repeated runs
-
-⸻
+# Cournot Protocol — Architecture
 
-8.4 agents/collector/collector_agent.py
-
-Owner AI: “Data Acquisition Engineer”
-Purpose: evidence fetching from multiple sources with receipts.
+This document is the **single source of truth** for how this repository is structured and how the core “Proof of Reasoning” (PoR) pipeline works end-to-end.
 
-Pluggable Sources
-	•	BaseSource.fetch(requirement) -> EvidenceItem
-	•	PolymarketSource, WebSource, HttpSource
+The goal is that **any AI (or human)** can pick up *any module* in this repo and implement/modify code safely without guessing hidden contracts.
 
-Verification
-	•	attach ProvenanceProof from the best available tier
-	•	ensure retrieval_receipt includes timestamps and method
+---
 
-Tests
-	•	mocked source responses
-	•	provenance tier policy enforcement
+## 1. What this project is
 
-⸻
+Cournot is a deterministic, verifiable pipeline that turns a user’s market question into:
 
-8.5 agents/collector/verification/*
+1) a **structured, unambiguous PromptSpec**,  
+2) an **EvidenceBundle** with provenance,  
+3) an **Audited ReasoningTrace**,  
+4) a **DeterministicVerdict (YES/NO/INVALID + confidence)**,  
+5) a **PoRBundle** with cryptographic commitments (hashes / Merkle roots) that bind the above artifacts,  
+6) an **Artifact Pack** (directory or zip) that is portable and independently verifiable.
 
-Owner AI: “Evidence Verification Engineer”
-Purpose: verify provenance proofs.
+“Deterministic” here means:
+- the committed artifacts serialize identically via canonical JSON, and
+- non-deterministic fields (timestamps, random IDs) are **excluded from commitments** or normalized to `None` in strict mode.
 
-APIs
-	•	verify(item: EvidenceItem) -> ProvenanceCheck
-	•	tier_policy.enforce(bundle, min_tier)
+---
 
-Note
-	•	zkTLS verification can be stubbed with interfaces until integrated.
+## 2. Repository layout
 
-⸻
+High-level folders and the responsibilities they own:
 
-8.6 agents/auditor/auditor_agent.py + reasoning/*
+- `core/`
+  - **Pure, deterministic primitives**: canonical JSON, hashing, Merkle commitments, schemas/models, PoR bundle/roots computation.
+  - No network calls, no LLM calls.
+- `agents/`
+  - “Role” implementations: prompt engineer, collector, auditor, judge, validator/sentinel.
+  - This is where policy/LLM logic lives.
+- `orchestrator/`
+  - Composes agents into a deterministic pipeline runner.
+  - Responsible for SOP sequencing, state passing, aggregation, building PoR bundles, and producing artifact packs.
+- `orchestrator/artifacts/`
+  - Portable pack formats (directory/zip), manifest + hashes, load/save/validate utilities.
+- `api/`
+  - Minimal FastAPI surface for `/run`, `/verify`, `/replay` and request/response models.
+- `docs/modules/`
+  - Module design contracts (what each module must do, public interfaces, acceptance tests).
+- `tests/`
+  - Unit + integration tests that enforce determinism, schema stability, and verification behavior.
 
-Owner AI: “Reasoning Engineer”
-Purpose: deterministic, evidence-grounded reasoning + trace emission.
+---
 
-Core Steps
-	1.	normalize evidence
-	2.	extract claims
-	3.	run contradiction detection
-	4.	apply freshness/time-window checks
-	5.	produce structured reasoning steps
+## 3. System artifacts (the “contracts”)
 
-Trace Requirements
-	•	every step references evidence IDs
-	•	no free-form “new facts”
-	•	emit ReasoningStep objects with stable fields
+These are the objects you should treat as **public interfaces**. They should be versioned, backward compatible where possible, and always serializable via canonical JSON.
 
-Tests
-	•	contradiction case: evidence says A and not-A → must mark INVALID or reduce confidence
-	•	stale evidence case: timestamp out of window → reject
+### 3.1 PromptSpec (+ MarketSpec)
 
-⸻
+**Produced by:** Prompt Engineer (Module 04)  
+**Consumed by:** Collector, Auditor, Judge, Pipeline/Orchestrator
 
-8.7 agents/judge/judge_agent.py + verification/*
+Purpose: make the user’s intent executable and unambiguous:
+- explicit event definition and time window
+- explicit resolution criteria and allowed resolution sources
+- explicit required data sources/endpoints (“source_targets”)
+- output schema locked to `DeterministicVerdict`
 
-Owner AI: “Determinism Engineer”
-Purpose: schema-locked verdict mapping.
+### 3.2 ToolPlan (optional but recommended)
 
-Rules
-	•	output must be exactly DeterministicVerdict
-	•	map to enum {YES, NO, INVALID}
-	•	include rule_id + confidence bounds
-	•	optionally produce selected_leaf_refs for compact justification
+**Produced by:** Prompt Engineer  
+Purpose: the execution plan for evidence collection and replay (when applicable).
 
-Tests
-	•	invalid JSON -> rejected
-	•	ambiguous language -> INVALID
+### 3.3 EvidenceBundle
 
-⸻
+**Produced by:** Collector (Module 05)  
+Purpose: a list of EvidenceItems + provenance proofs and retrieval receipts.
 
-8.8 orchestrator/sop_executor.py
+The EvidenceBundle must be able to commit to a stable **evidence_root** for PoR.
 
-Owner AI: “Workflow Engineer”
-Purpose: enforce SOP order, timeouts, leaf collection, error handling.
-
-Responsibilities
-	•	stage runner: run_stage(stage_name, agent_call) -> stage_output
-	•	leaf registry: collects leaves from each stage
-	•	uniform error type: SOPExecutionError
-
-Tests
-	•	stage failure bubbles with structured error
-	•	leaf collection yields consistent leaf ordering
-
-⸻
-
-8.9 orchestrator/market_resolver.py
-
-Owner AI: “Market Engineer”
-Purpose: apply settlement policy and produce final resolution payload.
-
-Inputs
-	•	MarketSpec
-	•	DeterministicVerdict
-	•	PoRBundle roots
-
-Outputs
-	•	ResolutionPayload for API / on-chain client
-	•	for Polymarket integration: adapter style
-
-Tests
-	•	rules mapping correctness
-	•	deadline enforcement
-
-⸻
-
-8.10 agents/validator/* (Sentinel)
-
-Owner AI: “Adversarial Verification Engineer”
-Purpose: Slow path verifier and challenge creation.
-
-Key Features
-	•	re-verify provenance
-	•	re-check trace consistency
-	•	deterministic replay hooks
-	•	generate ChallengeBundle referencing a leaf index + Merkle branch
-
-Tests
-	•	tampered leaf detection
-	•	replay mismatch detection
-
-⸻
-
-## Prompt & Config Layout (YAML)
-
-Keep your config/prompts/*.yaml, but standardize them with:
-	•	role
-	•	purpose
-	•	input_schema_ref
-	•	output_schema_ref
-	•	constraints
-	•	few_shots (optional)
-	•	determinism_policy
-
-Example (conceptual):
-	•	orchestrator_prompts.yaml: “how to call tools and enforce SOP”
-	•	collector_prompts.yaml: “how to choose sources + emit receipts”
-	•	auditor_prompts.yaml: “how to emit ReasoningStep objects”
-	•	judge_prompts.yaml: “strict JSON verdict only”
-
-⸻
-
-## End-to-End Example Scenario (Prediction Market)
-
-User input (free text):
-“Will Company X announce an acquisition of Company Y before March 31, 2026?”
-
-10.1 Prompt Engineer output (structured)
-	•	Event: “Official press release OR SEC filing confirming acquisition intent”
-	•	Time window: now → 2026-03-31 23:59:59 (timezone fixed)
-	•	Sources: SEC EDGAR, company newsroom, trusted wire
-	•	Rule: YES if primary source confirms; NO if deadline passes without confirmation; INVALID if sources unavailable.
-
-10.2 Collector
-	•	fetch EDGAR filings, press releases
-	•	attach provenance tier proofs (best possible)
-	•	produce EvidenceBundle
-
-10.3 Auditor
-	•	extract claims: “acquisition announced” vs “rumor”
-	•	reject rumors unless policy allows Tier-3 sources
-	•	produce reasoning trace and root
-
-10.4 Judge
-	•	map to YES/NO/INVALID deterministically
-	•	produce final verdict payload
-
-10.5 Validator
-	•	checks evidence proofs + trace consistency
-	•	if Auditor ignored an EDGAR timestamp → challenge that leaf
-
-⸻
-## Testing Strategy
-	1.	Unit tests: schemas, merkle roots, leaf hashing, signature verification
-	2.	Integration tests: pipeline with mocked sources and deterministic LLM
-	3.	Adversarial tests:
-	•	contradictory evidence
-	•	stale evidence
-	•	prompt injection attempts in evidence content
-	•	collector returning wrong tier metadata
-	•	auditor hallucinating evidence IDs
-
-⸻
-
-## Implementation Milestones (Suggested Order)
-	1.	Finalize core/schemas + canonical serialization
-	2.	Implement core/por bundle + Merkle rules
-	3.	Prompt Engineer: produce PromptSpec + ToolPlan reliably
-	4.	Collector: pluggable sources + receipts + tier policy
-	5.	Auditor: reasoning trace emission + contradiction checks
-	6.	Judge: schema lock + deterministic verdict mapping
-	7.	SOP executor: leaf registry + consistent PoRBundle
-	8.	Sentinel validator: verification + pinpoint challenge generation
-	9.	API routes + example Polymarket adapter
-
-⸻
-
-## What to Hand to Different AIs (Clear Work Packages)
-	•	AI #1 (Schema Engineer): implement all Pydantic models + canonical JSON + tests
-	•	AI #2 (Protocol Engineer): implement PoRBundle builder/verifier + Merkle proofs + tests
-	•	AI #3 (Prompt Architect): implement Prompt Engineer agent + ToolPlan compiler + YAML prompt contract
-	•	AI #4 (Collector Engineer): implement data sources + EvidenceBundle creation + receipts
-	•	AI #5 (Reasoning Engineer): implement deterministic reasoning trace + contradiction & freshness logic
-	•	AI #6 (Determinism Engineer): implement Judge agent + schema locking + output constraints
-	•	AI #7 (Workflow Engineer): implement SOP executor + orchestration + error taxonomy
-	•	AI #8 (Sentinel Engineer): implement verification & challenge bundles
-
-Each package only depends on schemas and a small set of stable interfaces.
+### 3.4 ReasoningTrace
+
+**Produced by:** Auditor (Module 06)  
+Purpose: a structured trace of how conclusions were derived from evidence, with policy checks.
+
+The trace must be able to commit to a stable **reasoning_root** for PoR.
+
+### 3.5 DeterministicVerdict
+
+**Produced by:** Judge (Module 07)  
+Purpose: the final outcome and confidence; *not* free-form text.
+
+Required outcomes:
+- `YES`
+- `NO`
+- `INVALID` (means the system executed successfully but the market cannot be resolved deterministically)
+
+### 3.6 PoRRoots + PoRBundle
+
+**Produced by:** Orchestrator (Module 09A) using core commitments (Modules 02–03)  
+Purpose:
+- Bind `PromptSpec`, `EvidenceBundle`, `ReasoningTrace`, and `DeterministicVerdict` into a single cryptographic commitment record.
+- Provide `por_root` and component hashes/roots.
+
+### 3.7 PoRPackage (portable bundle)
+
+**Produced by:** Artifact Packaging (Module 09B)  
+Purpose: a single container holding the bundle plus all referenced artifacts, ready to save/load/verify.
+
+---
+
+## 4. Pipeline (SOP) — end-to-end control flow
+
+The orchestrator runs a strict sequence of steps (“SOP”). The **primary entrypoint** is:
+
+- `Pipeline.run(user_input: str) -> RunResult`
+
+### 4.1 Step-by-step flow
+
+1) **Prompt compilation**
+   - PromptEngineerAgent.run(user_input) → `(PromptSpec, ToolPlan)`
+   - strict mode must record `PromptSpec.extra["strict_mode"] = True`
+   - deterministic timestamps (if enabled) must strip timestamps from committed artifacts
+
+2) **Evidence collection**
+   - CollectorAgent.collect(prompt_spec, tool_plan) → `EvidenceBundle`
+   - provenance proofs/receipts must be attached (tier-dependent)
+   - failures should be recorded but the pipeline may continue
+
+3) **Audit / reasoning trace**
+   - AuditorAgent.audit(prompt_spec, evidence_bundle) → `(ReasoningTrace, VerificationResult)`
+   - if audit verification fails, pipeline still continues, but likely ends in INVALID
+
+4) **Judge verdict**
+   - JudgeAgent.judge(prompt_spec, evidence_bundle, trace) → `(DeterministicVerdict, VerificationResult)`
+
+5) **Compute roots + build PoR bundle**
+   - compute roots from (PromptSpec, EvidenceBundle, ReasoningTrace, Verdict)
+   - build PoRBundle with the verdict embedded
+
+6) **Optional Sentinel verify**
+   - assemble a PoRPackage and run SentinelAgent.verify(...)
+   - optional replay (if ToolPlan exists and replay is enabled)
+
+7) **Aggregate checks**
+   - `ok` indicates whether the pipeline executed successfully (even if the verdict is INVALID)
+
+### 4.2 Determinism rules enforced by orchestrator
+
+In strict/deterministic mode, **committed objects must not include non-deterministic fields**:
+- PromptSpec timestamps must be `None`
+- RetrievalReceipt timestamps should be `None`
+- Verdict resolution timestamps should be `None`
+
+If a schema includes such fields, they must be excluded from the canonical commitment or normalized before hashing.
+
+---
+
+## 5. Module map (what each module owns)
+
+> Naming follows the design docs in `docs/modules/`. The concrete Python layout may differ slightly; the responsibilities below are the contracts to preserve.
+
+### Module 01 — Schemas & Canonicalization (core)
+
+**Owns:**
+- Canonical JSON serialization (`dumps_canonical`)
+- Schema versioning (protocol/schema version constants)
+- Pydantic models for PromptSpec, ToolPlan, EvidenceBundle, ReasoningTrace, DeterministicVerdict, VerificationResult, etc.
+
+**Public API (typical):**
+- `dumps_canonical(obj) -> str|bytes`
+- `model.model_dump(...)` must be commitment-safe (exclude unstable fields)
+
+**Key constraints:**
+- Canonical output must be stable across platforms and runs.
+- Schema evolution must be explicit (versions), and new fields should be optional with sane defaults.
+
+### Module 02 — Merkle Commitments (core)
+
+**Owns:**
+- Merkle root computation from leaf hashes
+- Merkle proof format and verification
+
+**Public API (typical):**
+- `build_merkle_root(leaf_hashes: list[bytes]) -> bytes`
+- `build_merkle_proof(leaf_hashes, index) -> MerkleProof`
+- `verify_merkle_proof(root, leaf_hash, proof) -> bool`
+
+**Key constraints:**
+- Must define deterministic padding behavior (e.g., duplicate last leaf when odd).
+
+### Module 03 — PoR Bundle & Commitments (core)
+
+**Owns:**
+- Commitment computation (prompt hash, evidence root, reasoning root, verdict hash)
+- PoRRoots structure and por_root derivation
+- PoRBundle schema and verify helpers
+
+**Public API (typical):**
+- `compute_roots(prompt_spec, evidence_bundle, trace, verdict) -> PoRRoots`
+- `build_por_bundle(roots, verdict, ...) -> PoRBundle`
+- `verify_por_bundle(bundle, prompt_spec, evidence_bundle, trace, verdict) -> VerificationResult`
+
+### Module 04 — Prompt Engineer (agent)
+
+**Owns:**
+- Conversion from user free-text → strict PromptSpec (+ ToolPlan)
+- Deterministic IDs and strict mode metadata
+- Validation that the PromptSpec is executable and unambiguous
+
+**Inputs:** `user_input: str`  
+**Outputs:** `(PromptSpec, ToolPlan)`
+
+**Acceptance requirements (examples):**
+- every DataRequirement has ≥1 explicit URL/source_target
+- ToolPlan requirements match PromptSpec requirement ordering
+- output schema locked to DeterministicVerdict (YES/NO/INVALID + confidence)
+- strict mode recorded in `PromptSpec.extra`
+
+### Module 05 — Evidence Collector (agent)
+
+**Owns:**
+- Fetching evidence from sources described in PromptSpec/ToolPlan
+- Generating RetrievalReceipts and provenance proofs (tier-based)
+- Normalizing/structuring evidence into EvidenceBundle
+
+**Inputs:** `(PromptSpec, ToolPlan)`  
+**Outputs:** `EvidenceBundle`
+
+**Key sub-areas:**
+- `agents/collector/data_sources/` (polymarket, web/http, etc.)
+- `agents/collector/verification/` (signature verification, zkTLS verifier, tier policy)
+
+### Module 06 — Auditor (agent)
+
+**Owns:**
+- Producing a structured ReasoningTrace from evidence and prompt spec
+- Running contradiction checks, claim extraction, and trace-policy verification
+- Outputting a VerificationResult with granular CheckResults
+
+**Inputs:** `(PromptSpec, EvidenceBundle)`  
+**Outputs:** `(ReasoningTrace, VerificationResult)`
+
+### Module 07 — Judge (agent)
+
+**Owns:**
+- Mapping evidence + reasoning trace to a DeterministicVerdict
+- Schema locking and deterministic mapping checks
+- Outputting a VerificationResult (judge checks)
+
+**Inputs:** `(PromptSpec, EvidenceBundle, ReasoningTrace)`  
+**Outputs:** `(DeterministicVerdict, VerificationResult)`
+
+### Module 08 — Validator / Sentinel (agent)
+
+**Owns:**
+- Independent re-verification of a PoRPackage / artifact pack
+- Recomputing commitments and verifying por_root
+- Optional replay (if ToolPlan exists) using `replay_executor`
+- Producing challenges / failures (`agents/validator/challenges.py`)
+
+**Inputs:** `PoRPackage` (or pack path/bytes)  
+**Outputs:** `VerificationResult` (+ optional challenges)
+
+### Module 09A — Pipeline Integration (orchestrator)
+
+**Owns:**
+- The in-process deterministic pipeline runner composing Modules 04–08
+- SOP step execution (SOPExecutor), PipelineState
+- Aggregating VerificationResults
+- Producing RunResult containing all artifacts + roots + bundle
+
+**Key types:**
+- `PipelineConfig` (strict mode, replay enabling, deterministic timestamp mode)
+- `RunResult` (full output container)
+- `resolve_market(verdict)` helper (thin translation layer)
+
+### Module 09B — Artifact Packaging & IO (orchestrator)
+
+**Owns:**
+- PoRPackage container type
+- Pack layout, manifest, and file hashing
+- Save/load/validate functions
+
+**Pack formats:**
+- Directory format (inspectable)
+- Zip format (portable)
+
+**Proposed layout:**
+```
+pack/
+  manifest.json
+  prompt_spec.json
+  tool_plan.json          (optional)
+  evidence_bundle.json
+  reasoning_trace.json
+  verdict.json
+  por_bundle.json
+  checks/                 (optional)
+    pipeline_checks.json
+    audit_checks.json
+    judge_checks.json
+    sentinel_checks.json
+  blobs/                  (optional future)
+```
+
+### Module 09C — CLI (tooling)
+
+**Owns:**
+- A command-line interface to run and verify pipeline outputs.
+
+**Typical commands:**
+- `cournot run "<question>" --out <path> [--strict]`
+- `cournot verify <pack_path> [--por-root <expected>]`
+- `cournot replay <pack_path> [...]`
+
+The CLI should be a thin wrapper over orchestrator and artifact APIs.
+
+### Module 09D — Minimal API (service)
+
+**Owns:**
+- FastAPI surface for running and verifying PoR.
+
+**Endpoints (typical):**
+- `POST /run` → execute pipeline and return verdict + por_root + pack path/bytes
+- `POST /verify` → verify an existing pack
+- `POST /replay` → replay steps (if ToolPlan supports it)
+- `GET /healthz` → liveness
+
+The API should call orchestrator/artifacts primitives; no business logic should be embedded here.
+
+---
+
+## 6. “How to implement safely” (rules for contributors & AIs)
+
+1) **Never bypass core schemas**
+   - Agents and orchestrator must exchange Pydantic schema objects (or their canonical JSON equivalents).
+
+2) **Canonical JSON is the truth**
+   - Any commitment hash must be over canonical JSON bytes.
+   - If you change a schema, you must consider versioning and back-compat.
+
+3) **Determinism is a feature**
+   - Do not commit runtime timestamps, random IDs, or environment-specific data.
+   - If you need them operationally, store them in non-committed fields or the pack’s optional `checks/`.
+
+4) **Verification is composable**
+   - Every module should return `VerificationResult` with granular `CheckResult`s.
+   - Sentinel should be able to run without network access when verifying an existing pack (unless replay is requested).
+
+5) **Pluggability**
+   - Add new data sources under `agents/collector/data_sources/`.
+   - Add new provenance verifiers under `agents/collector/verification/`.
+   - Add new prompt compilers behind the Prompt Engineer interface.
+
+---
+
+## 7. Quick developer mental model
+
+If you only remember one thing:
+
+> The pipeline produces a portable pack that can be validated by recomputing commitments and comparing the final `por_root`.
+
+The practical consequences:
+- every field in committed artifacts must be stable and canonicalizable,
+- pack layout and manifest hashing must be consistent,
+- validators should never “trust” agent output without recomputing what can be recomputed.
+
+---
+
+## 8. Appendix — recommended “entrypoints” when navigating code
+
+- **Run pipeline (programmatic):** `orchestrator.Pipeline.run(...)`
+- **Pack IO:** `orchestrator.artifacts.save_pack(...)`, `load_pack(...)`, `validate_pack(...)`
+- **Collector:** `agents.collector.CollectorAgent.collect(...)`
+- **Auditor:** `agents.auditor.AuditorAgent.audit(...)`
+- **Judge:** `agents.judge.JudgeAgent.judge(...)`
+- **Sentinel:** `agents.validator.SentinelAgent.verify(...)`
+- **API:** `api/app.py`
+
