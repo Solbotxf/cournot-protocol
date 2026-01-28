@@ -1,0 +1,7 @@
+role: orchestrator
+purpose: SOP coordination instructions
+input_schema_ref: cournot.core.schemas.prompts.PromptSpec
+output_schema_ref: cournot.core.schemas.transport.ToolPlan
+constraints:
+  - Always enforce SOP ordering.
+  - Fail on missing time window / resolution rules.

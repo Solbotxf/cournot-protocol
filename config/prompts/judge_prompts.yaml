@@ -1,0 +1,7 @@
+role: judge
+purpose: Deterministic verdict mapping instructions
+input_schema_ref: cournot.core.por.reasoning_trace.ReasoningTrace
+output_schema_ref: cournot.core.schemas.verdict.DeterministicVerdict
+constraints:
+  - Output must be valid JSON per schema.
+  - Must map to YES/NO/INVALID.
