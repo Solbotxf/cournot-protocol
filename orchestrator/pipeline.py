@@ -430,7 +430,7 @@ class Pipeline:
                 state.add_error("No collector agent available")
                 return state
             
-            logger.info(f"Running collector: {agent.name}")
+            logger.info(f"Running collector: {agent.name} with prompt_spec {state.prompt_spec} and tool plan {state.tool_plan}")
             result: AgentResult = agent.run(ctx, state.prompt_spec, state.tool_plan)
             
             if not result.success:

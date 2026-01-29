@@ -7,6 +7,7 @@ Includes JSON validation with repair loop.
 
 from __future__ import annotations
 
+import logging
 import json
 import re
 import hashlib
@@ -30,6 +31,8 @@ from core.schemas import (
     ToolPlan,
 )
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE, JSON_REPAIR_PROMPT
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from agents.context import AgentContext
@@ -93,7 +96,8 @@ class LLMPromptCompiler:
         
         response = ctx.llm.chat(messages)
         raw_output = response.content
-        
+
+        logger.debug(f"LLM Prompt raw output: {raw_output}")
         # Try to parse with retries
         last_error: str | None = None
         for attempt in range(self.MAX_RETRIES + 1):
