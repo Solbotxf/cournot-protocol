@@ -27,14 +27,19 @@ class RunSummary(BaseModel):
     prompt_spec_hash: str | None = Field(default=None)
     evidence_root: str | None = Field(default=None)
     reasoning_root: str | None = Field(default=None)
+    execution_mode: str = Field(default="development", description="Execution mode used")
 
 
 class VerificationInfo(BaseModel):
     """Verification results from sentinel."""
     
     sentinel_ok: bool = Field(..., description="Whether sentinel verification passed")
+    total_checks: int = Field(default=0, description="Total number of checks performed")
+    passed_checks: int = Field(default=0, description="Number of passed checks")
+    failed_checks: int = Field(default=0, description="Number of failed checks")
     checks: list[dict[str, Any]] = Field(default_factory=list)
     challenges: list[dict[str, Any]] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class RunResponse(BaseModel):
@@ -68,6 +73,7 @@ class VerifyResponse(BaseModel):
     outcome: str = Field(..., description="Verdict outcome from the pack")
     checks: list[dict[str, Any]] = Field(default_factory=list)
     challenges: list[dict[str, Any]] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class DivergenceInfo(BaseModel):
@@ -92,6 +98,7 @@ class ReplayResponse(BaseModel):
     )
     checks: list[dict[str, Any]] = Field(default_factory=list)
     challenges: list[dict[str, Any]] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class ErrorDetail(BaseModel):

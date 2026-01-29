@@ -24,3 +24,15 @@ async def health_check() -> HealthResponse:
         service="cournot-protocol-api",
         version="v1",
     )
+
+
+@router.get("/", response_model=HealthResponse)
+async def root() -> HealthResponse:
+    """
+    Root endpoint - same as health check.
+    """
+    return HealthResponse(
+        ok=True,
+        service="cournot-protocol-api",
+        version="v1",
+    )

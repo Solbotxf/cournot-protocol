@@ -6,7 +6,7 @@ Standardized error handling for the API.
 
 from typing import Any
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from api.models.responses import ErrorResponse, ErrorDetail
@@ -86,6 +86,18 @@ class VerificationFailedError(APIError):
         )
 
 
+class PipelineError(APIError):
+    """Pipeline execution failed."""
+    
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(
+            code="PIPELINE_ERROR",
+            message=message,
+            status_code=500,
+            details=details,
+        )
+
+
 class InternalError(APIError):
     """Internal server error."""
     
@@ -115,7 +127,7 @@ async def generic_error_handler(request: Request, exc: Exception) -> JSONRespons
             error=ErrorDetail(
                 code="INTERNAL_ERROR",
                 message="An unexpected error occurred",
-                details={"type": type(exc).__name__},
+                details={"type": type(exc).__name__, "message": str(exc)},
             ),
         ).model_dump(),
     )
