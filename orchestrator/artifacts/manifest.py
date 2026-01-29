@@ -11,9 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from core.schemas.versioning import PROTOCOL_VERSION
+from core.schemas.versioning import SCHEMA_VERSION
 
 FORMAT_VERSION = "pack.v1"
+PROTOCOL_VERSION = SCHEMA_VERSION
 
 REQUIRED_FILES = frozenset({
     "prompt_spec",
@@ -135,6 +136,7 @@ def is_compatible_format_version(version: str) -> bool:
 
 __all__ = [
     "FORMAT_VERSION",
+    "PROTOCOL_VERSION",
     "REQUIRED_FILES",
     "OPTIONAL_FILES",
     "ALL_ARTIFACT_FILES",

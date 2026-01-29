@@ -13,7 +13,6 @@ import json
 import sys
 from argparse import Namespace
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +20,9 @@ from core.schemas.prompts import PromptSpec
 from core.schemas.transport import ToolPlan
 from core.schemas.evidence import EvidenceBundle
 from core.schemas.verdict import DeterministicVerdict
-from core.por.reasoning_trace import ReasoningTrace
+from core.schemas.reasoning import ReasoningTrace
 from core.por.por_bundle import PoRBundle
-from core.por.proof_of_reasoning import compute_roots, build_por_bundle
+from core.por.proof_of_reasoning import build_por_bundle
 
 from orchestrator.pipeline import PoRPackage
 from orchestrator.artifacts.io import save_pack

@@ -15,16 +15,19 @@ without rewriting the core flow.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Protocol, TypeVar
+from typing import Any, Callable, Optional, Protocol, TYPE_CHECKING
 
 from core.por.por_bundle import PoRBundle
 from core.por.proof_of_reasoning import PoRRoots
 from core.por.reasoning_trace import ReasoningTrace
 from core.schemas.evidence import EvidenceBundle
 from core.schemas.prompts import PromptSpec
-from core.schemas.transport import ToolPlan
+from core.schemas.transport import ToolExecutionLog, ToolPlan
 from core.schemas.verdict import DeterministicVerdict
 from core.schemas.verification import CheckResult, VerificationResult
+
+if TYPE_CHECKING:
+    from agents.context import AgentContext
 
 
 @dataclass
@@ -39,12 +42,16 @@ class PipelineState:
     # Input
     user_input: str = ""
     
+    # Agent context (set by pipeline runner)
+    context: Optional["AgentContext"] = None
+    
     # Step 1: Prompt compilation
     prompt_spec: Optional[PromptSpec] = None
     tool_plan: Optional[ToolPlan] = None
     
     # Step 2: Evidence collection
     evidence_bundle: Optional[EvidenceBundle] = None
+    execution_log: Optional[ToolExecutionLog] = None
     
     # Step 3: Audit / reasoning trace
     audit_trace: Optional[ReasoningTrace] = None

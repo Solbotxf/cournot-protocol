@@ -1,5 +1,5 @@
 """
-Module 09C - CLI Verify Command (Production)
+Module 09C - CLI Verify Command
 
 Verify an artifact pack offline:
 - Verify file hashes (manifest)
@@ -23,8 +23,7 @@ from typing import Any
 from orchestrator.artifacts.io import load_pack, validate_pack_files, PackIOError
 from orchestrator.artifacts.pack import validate_pack
 from orchestrator.pipeline import PoRPackage
-from core.por.proof_of_reasoning import verify_por_bundle
-from core.schemas.verification import VerificationResult
+from core.schemas.verification import VerificationResult, CheckResult
 
 
 logger = logging.getLogger(__name__)
@@ -88,24 +87,51 @@ def verify_semantic(package: PoRPackage) -> tuple[bool, VerificationResult]:
 
 def verify_sentinel(package: PoRPackage) -> tuple[bool, VerificationResult, list[dict]]:
     """Run sentinel verification on the pack."""
+    from agents import AgentContext
+    from agents.sentinel import build_proof_bundle, verify_proof
+    
     logger.info("Running sentinel verification...")
-    result = verify_por_bundle(
-        package.bundle,
-        prompt_spec=package.prompt_spec,
-        evidence=package.evidence,
-        trace=package.trace,
+    
+    ctx = AgentContext.create_minimal()
+    
+    # Build proof bundle from package
+    proof_bundle = build_proof_bundle(
+        package.prompt_spec,
+        package.tool_plan,
+        package.evidence,
+        package.trace,
+        package.verdict,
+        None,  # execution_log
     )
     
-    challenges = []
-    if not result.ok and result.challenge:
-        challenges.append({
-            "kind": result.challenge.kind,
-            "reason": result.challenge.reason,
-            "evidence_id": result.challenge.evidence_id,
-            "step_id": result.challenge.step_id,
-        })
+    # Verify
+    result = verify_proof(ctx, proof_bundle)
+    verification_result, report = result.output
     
-    return result.ok, result, challenges
+    challenges = []
+    if not report.verified and report.errors:
+        for error in report.errors:
+            challenges.append({
+                "kind": "verification_error",
+                "reason": error,
+            })
+    
+    # Build VerificationResult from report
+    checks = []
+    for cat_name in ["completeness_checks", "hash_checks", "consistency_checks", 
+                     "provenance_checks", "reasoning_checks"]:
+        cat_checks = getattr(report, cat_name, [])
+        for check in cat_checks:
+            checks.append(CheckResult(
+                check_id=check.get("check_id", "unknown"),
+                ok=check.get("passed", False),
+                severity=check.get("severity", "error"),
+                message=check.get("message", ""),
+            ))
+    
+    sentinel_result = VerificationResult(ok=report.verified, checks=checks)
+    
+    return report.verified, sentinel_result, challenges
 
 
 def build_summary(

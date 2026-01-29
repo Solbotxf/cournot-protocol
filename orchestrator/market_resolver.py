@@ -10,7 +10,7 @@ without any persistence. Persistence will be added in Module 09C.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from core.schemas.verdict import DeterministicVerdict, Outcome
 

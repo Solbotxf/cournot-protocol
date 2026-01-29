@@ -1,76 +1,54 @@
 """
-Collector Agent Package
+Collector Agent Module
 
-Data acquisition and provenance verification for the Cournot protocol.
+Executes ToolPlans to collect evidence from external sources.
 
-The Collector agent:
-1. Executes explicit SourceTarget requests (URLs/endpoints)
-2. Captures retrieval receipts (timestamps, fingerprints)
-3. Attaches provenance proofs (tiered)
-4. Enforces minimum provenance tier + selection policy
-5. Outputs EvidenceBundle with stable evidence_id and ordering
+Usage:
+    from agents.collector import collect_evidence, CollectorHTTP, CollectorMock
+    
+    # Using convenience function (auto-selects based on context)
+    result = collect_evidence(ctx, prompt_spec, tool_plan)
+    evidence_bundle, execution_log = result.output
+    
+    # Using specific agent
+    collector = CollectorHTTP()
+    result = collector.run(ctx, prompt_spec, tool_plan)
 """
 
-from agents.collector.collector_agent import (
-    CollectorAgent,
-    CollectorConfig,
+from .agent import (
+    CollectorHTTP,
+    CollectorMock,
+    collect_evidence,
+    get_collector,
 )
-from agents.collector.data_sources import (
-    APISource,
-    BaseSource,
-    ExchangeSource,
-    FetchedArtifact,
-    HTTPSource,
-    PolymarketSource,
-    SourceProtocol,
-    WebSource,
-    get_source_for_target,
-)
-from agents.collector.verification import (
-    DEFAULT_TIER_MAPPING,
-    SelectionPolicyEnforcer,
-    SignatureVerifier,
-    TierPolicy,
-    ZkTLSProofMetadata,
-    ZkTLSVerifier,
-)
-from agents.collector.collector_utils import (
-    compute_bundle_id,
-    compute_evidence_id,
-    compute_request_fingerprint,
-    compute_response_fingerprint,
-    compute_tier_distribution,
-    map_method,
-    normalize_content,
+
+from .engine import CollectionEngine
+
+from .adapters import (
+    CryptoExchangeAdapter,
+    HttpAdapter,
+    MockAdapter,
+    PolymarketAdapter,
+    SourceAdapter,
+    get_adapter,
+    register_adapter,
 )
 
 __all__ = [
-    # Main Agent
-    "CollectorAgent",
-    "CollectorConfig",
-    # Data Sources
-    "BaseSource",
-    "FetchedArtifact",
-    "SourceProtocol",
-    "HTTPSource",
-    "APISource",
-    "WebSource",
-    "PolymarketSource",
-    "ExchangeSource",
-    "get_source_for_target",
-    # Verification
-    "TierPolicy",
-    "SelectionPolicyEnforcer",
-    "DEFAULT_TIER_MAPPING",
-    "SignatureVerifier",
-    "ZkTLSVerifier",
-    "ZkTLSProofMetadata",
-    # Utilities
-    "compute_bundle_id",
-    "compute_evidence_id",
-    "compute_request_fingerprint",
-    "compute_response_fingerprint",
-    "compute_tier_distribution",
-    "map_method",
-    "normalize_content",
+    # Agents
+    "CollectorHTTP",
+    "CollectorMock",
+    # Functions
+    "collect_evidence",
+    "get_collector",
+    # Engine
+    "CollectionEngine",
+    # Adapters
+    "SourceAdapter",
+    "HttpAdapter",
+    "PolymarketAdapter",
+    "CryptoExchangeAdapter",
+    "MockAdapter",
+    "get_adapter",
+    "register_adapter",
 ]

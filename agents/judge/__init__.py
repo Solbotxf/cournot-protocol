@@ -1,74 +1,37 @@
 """
-Module 07 - Judge Agent
-Produces deterministic verdicts from (PromptSpec, EvidenceBundle, ReasoningTrace).
+Judge Agent Module
 
-Owner: Protocol/Judging Engineer
-Module ID: M07
-
-This module provides:
-- JudgeAgent: The main agent that produces DeterministicVerdict
-- Schema lock verification for deterministic judging
-- Deterministic mapping engine for YES/NO/INVALID decisions
-- Confidence computation based on policy
-
-Public API:
-- JudgeAgent: Main entry point
-- AgentContext: Context for agent operations
-- SchemaLock: Schema validation utilities
-- EvaluationVariables: Structured evaluation state
-- ConfidencePolicy: Confidence computation policy
+Finalizes verdicts from reasoning traces.
 
 Usage:
-    from agents.judge import JudgeAgent
+    from agents.judge import judge_verdict, JudgeLLM, JudgeRuleBased
     
-    judge = JudgeAgent()
-    verdict, result = judge.judge(prompt_spec, evidence, trace)
+    # Using convenience function (auto-selects based on context)
+    result = judge_verdict(ctx, prompt_spec, evidence_bundle, reasoning_trace)
+    verdict = result.output
     
-    if result.ok:
-        print(f"Verdict: {verdict.outcome}")
-    else:
-        print(f"Failed: {result.get_error_messages()}")
+    # Using specific agent
+    judge = JudgeRuleBased()
+    result = judge.run(ctx, prompt_spec, evidence_bundle, reasoning_trace)
 """
 
-from .judge_agent import (
-    JudgeAgent,
-    AgentContext,
-    BaseAgent,
+from .agent import (
+    JudgeLLM,
+    JudgeRuleBased,
+    get_judge,
+    judge_verdict,
 )
 
-from .verification import (
-    # Deterministic mapping
-    EvaluationVariables,
-    ConfidencePolicy,
-    extract_evaluation_variables,
-    check_validity,
-    check_conflicts,
-    determine_binary_outcome,
-    compute_confidence,
-    map_to_verdict,
-    # Schema lock
-    SchemaLock,
-    EXPECTED_OUTPUT_SCHEMA_REF,
-    VALID_OUTCOMES,
-)
-
+from .verdict_builder import VerdictBuilder, VerdictValidator
 
 __all__ = [
-    # Agent
-    "JudgeAgent",
-    "AgentContext",
-    "BaseAgent",
-    # Verification - deterministic mapping
-    "EvaluationVariables",
-    "ConfidencePolicy",
-    "extract_evaluation_variables",
-    "check_validity",
-    "check_conflicts",
-    "determine_binary_outcome",
-    "compute_confidence",
-    "map_to_verdict",
-    # Verification - schema lock
-    "SchemaLock",
-    "EXPECTED_OUTPUT_SCHEMA_REF",
-    "VALID_OUTCOMES",
+    # Agents
+    "JudgeLLM",
+    "JudgeRuleBased",
+    # Functions
+    "get_judge",
+    "judge_verdict",
+    # Builders
+    "VerdictBuilder",
+    "VerdictValidator",
 ]

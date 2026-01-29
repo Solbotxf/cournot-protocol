@@ -1,10 +1,11 @@
 """
-Module 09C - CLI Run Command (Production)
+Module 09C - CLI Run Command
 
-Execute the full pipeline using the real agents from agents/ package.
+Execute the full pipeline using registry-based agent selection.
 
 Usage:
     cournot run "<query>" --out pack.zip
+    cournot run "<query>" --mode production --require-llm
 """
 
 from __future__ import annotations
@@ -15,18 +16,9 @@ import sys
 from argparse import Namespace
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from cournot_cli.config import CLIConfig
-
-# Type checking imports (not executed at runtime)
-if TYPE_CHECKING:
-    from agents.prompt_engineer import PromptEngineerAgent
-    from agents.collector import CollectorAgent, CollectorConfig
-    from agents.auditor import AuditorAgent
-    from agents.judge import JudgeAgent
-    from agents.validator import SentinelAgent, PoRPackage
-    from orchestrator.pipeline import Pipeline, PipelineConfig, RunResult
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +43,7 @@ class RunSummary:
     saved_to: str | None = None
     ok: bool = True
     verification_ok: bool = True
+    execution_mode: str = ""
     checks: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     
@@ -65,79 +58,60 @@ class RunSummary:
         return d
 
 
-def _import_agents():
-    """Import agents lazily to allow CLI to work without agents installed."""
-    try:
-        from agents.prompt_engineer import PromptEngineerAgent
-        from agents.collector import CollectorAgent, CollectorConfig
-        from agents.auditor import AuditorAgent
-        from agents.judge import JudgeAgent
-        from agents.validator import SentinelAgent, PoRPackage
-        from orchestrator.pipeline import Pipeline, PipelineConfig, RunResult
-        from orchestrator.artifacts.io import save_pack
-        
-        return {
-            "PromptEngineerAgent": PromptEngineerAgent,
-            "CollectorAgent": CollectorAgent,
-            "CollectorConfig": CollectorConfig,
-            "AuditorAgent": AuditorAgent,
-            "JudgeAgent": JudgeAgent,
-            "SentinelAgent": SentinelAgent,
-            "PoRPackage": PoRPackage,
-            "Pipeline": Pipeline,
-            "PipelineConfig": PipelineConfig,
-            "RunResult": RunResult,
-            "save_pack": save_pack,
-        }
-    except ImportError as e:
-        raise ImportError(
-            f"Could not import agents package: {e}\n"
-            "The 'run' command requires the agents package to be installed.\n"
-            "Make sure the agents/ directory is in your PYTHONPATH."
-        ) from e
-
-
-def create_agents(config: CLIConfig) -> dict[str, Any]:
+def create_agent_context(config: CLIConfig):
     """
-    Create all pipeline agents using the real implementations.
+    Create an AgentContext based on configuration.
     
     Args:
         config: CLI configuration
     
     Returns:
-        Dictionary of agent instances
+        AgentContext instance
     """
-    modules = _import_agents()
+    from agents import AgentContext
     
-    # Create Prompt Engineer
-    prompt_engineer = modules["PromptEngineerAgent"]()
+    # Start with minimal context
+    ctx = AgentContext.create_minimal()
     
-    # Create Collector with configuration
-    collector_config = modules["CollectorConfig"](
-        default_timeout_s=config.collector.default_timeout_s,
-        strict_tier_policy=config.collector.strict_tier_policy,
-        include_timestamps=config.collector.include_timestamps,
-        collector_id=config.collector.collector_id,
-    )
-    collector = modules["CollectorAgent"](config=collector_config)
+    # Add LLM if configured
+    if config.llm.provider and config.llm.api_key:
+        logger.debug(f"getting llm config: {config.llm}")
+        try:
+            from core.llm import create_llm_client
+            llm = create_llm_client(
+                provider=config.llm.provider,
+                api_key=config.llm.api_key,
+                model=config.llm.model,
+                endpoint=config.llm.endpoint or None,
+            )
+            ctx = AgentContext(
+                llm=llm,
+                http=ctx.http,
+                recorder=ctx.recorder,
+                config=ctx.config,
+                cache=ctx.cache,
+                logger=ctx.logger,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create LLM client: {e}")
     
-    # Create Auditor
-    auditor = modules["AuditorAgent"]()
+    # Add HTTP client if needed
+    if config.require_network or config.execution_mode == "production":
+        try:
+            from core.http import HttpClient
+            http = HttpClient()
+            ctx = AgentContext(
+                llm=ctx.llm,
+                http=http,
+                recorder=ctx.recorder,
+                config=ctx.config,
+                cache=ctx.cache,
+                logger=ctx.logger,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create HTTP client: {e}")
     
-    # Create Judge
-    judge = modules["JudgeAgent"](require_strict_mode=config.strict_mode)
-    
-    # Create Sentinel (optional)
-    sentinel = modules["SentinelAgent"](strict_mode=config.strict_mode) if config.enable_sentinel else None
-    
-    return {
-        "prompt_engineer": prompt_engineer,
-        "collector": collector,
-        "auditor": auditor,
-        "judge": judge,
-        "sentinel": sentinel,
-        "_modules": modules,  # Keep reference for later use
-    }
+    return ctx
 
 
 def run_pipeline(
@@ -146,8 +120,8 @@ def run_pipeline(
     *,
     strict: bool | None = None,
     enable_sentinel: bool = True,
-    replay_mode: bool = False,
-) -> tuple[Any, Any]:
+    mode: str | None = None,
+):
     """
     Execute the pipeline with the given query.
     
@@ -156,44 +130,56 @@ def run_pipeline(
         config: CLI configuration
         strict: Override strict mode (None = use config)
         enable_sentinel: Whether to enable sentinel verification
-        replay_mode: Whether to enable replay mode
+        mode: Override execution mode
     
     Returns:
-        Tuple of (RunResult, PoRPackage or None)
+        Tuple of (RunResult, PoRPackage or None, execution_mode)
     """
-    logger.info("Creating agents...")
-    agents = create_agents(config)
-    modules = agents["_modules"]
+    from orchestrator import (
+        Pipeline,
+        PipelineConfig,
+        ExecutionMode,
+        PoRPackage,
+    )
+    
+    logger.info("Creating agent context...")
+    ctx = create_agent_context(config)
+    
+    # Determine execution mode
+    exec_mode_str = mode or config.execution_mode
+    if exec_mode_str == "production":
+        exec_mode = ExecutionMode.PRODUCTION
+    elif exec_mode_str == "test":
+        exec_mode = ExecutionMode.TEST
+    else:
+        exec_mode = ExecutionMode.DEVELOPMENT
     
     # Determine strict mode
     if strict is None:
         strict = config.strict_mode
     
     # Create pipeline configuration
-    pipeline_config = modules["PipelineConfig"](
+    pipeline_config = PipelineConfig(
+        mode=exec_mode,
         strict_mode=strict,
         enable_sentinel_verify=enable_sentinel and config.enable_sentinel,
-        enable_replay=replay_mode,
+        enable_replay=config.enable_replay,
+        require_llm=config.require_llm,
+        require_network=config.require_network,
     )
     
-    # Create pipeline with real agents
-    pipeline = modules["Pipeline"](
-        config=pipeline_config,
-        prompt_engineer=agents["prompt_engineer"],
-        collector=agents["collector"],
-        auditor=agents["auditor"],
-        judge=agents["judge"],
-        sentinel=agents["sentinel"] if enable_sentinel else None,
-    )
+    # Create pipeline
+    pipeline = Pipeline(config=pipeline_config, context=ctx)
     
     # Run pipeline
     logger.info(f"Running pipeline for query: {query[:50]}...")
+    logger.info(f"Execution mode: {exec_mode.value}")
     result = pipeline.run(query)
     
     # Build PoRPackage for saving
     package = None
     if result.por_bundle is not None:
-        package = modules["PoRPackage"](
+        package = PoRPackage(
             bundle=result.por_bundle,
             prompt_spec=result.prompt_spec,
             tool_plan=result.tool_plan,
@@ -202,10 +188,15 @@ def run_pipeline(
             verdict=result.verdict,
         )
     
-    return result, package
+    return result, package, exec_mode.value
 
 
-def build_summary(result: Any, saved_to: str | None = None, debug: bool = False) -> RunSummary:
+def build_summary(
+    result,
+    execution_mode: str,
+    saved_to: str | None = None,
+    debug: bool = False,
+) -> RunSummary:
     """Build a RunSummary from pipeline result."""
     summary = RunSummary(
         market_id=result.market_id or "",
@@ -218,6 +209,7 @@ def build_summary(result: Any, saved_to: str | None = None, debug: bool = False)
         saved_to=saved_to,
         ok=result.ok,
         verification_ok=True,
+        execution_mode=execution_mode,
         errors=list(result.errors) if result.errors else [],
     )
     
@@ -241,18 +233,21 @@ def print_summary_human(summary: RunSummary) -> None:
     print(f"outcome: {summary.outcome}")
     print(f"confidence: {summary.confidence:.2f}")
     print(f"por_root: {summary.por_root}")
+    print(f"mode: {summary.execution_mode}")
     if summary.saved_to:
         print(f"saved: {summary.saved_to}")
     print(f"ok: {str(summary.ok).lower()}")
     print(f"verification_ok: {str(summary.verification_ok).lower()}")
     
     if summary.errors:
-        print(f"errors: {len(summary.errors)}")
+        print(f"\nerrors ({len(summary.errors)}):")
         for err in summary.errors[:5]:
             print(f"  - {err}")
     
     if summary.checks:
-        print(f"checks: {len(summary.checks)}")
+        passed = sum(1 for c in summary.checks if c["ok"])
+        failed = len(summary.checks) - passed
+        print(f"\nchecks: {passed} passed, {failed} failed")
         for check in summary.checks[:10]:
             status = "✓" if check["ok"] else "✗"
             print(f"  {status} {check['check_id']}: {check['message']}")
@@ -276,25 +271,25 @@ def run_cmd(args: Namespace) -> int:
     query = args.query
     out_path = args.out
     enable_sentinel = not args.no_sentinel
-    replay_mode = args.replay
     strict = args.strict
+    mode = getattr(args, "mode", None)
     output_json = args.json
     debug = args.debug
     
     # Get configuration from args (set by main.py)
     config: CLIConfig = getattr(args, "cli_config", None)
     if config is None:
-        print("Error: Configuration not loaded", file=sys.stderr)
-        return EXIT_RUNTIME_ERROR
+        from cournot_cli.config import CLIConfig
+        config = CLIConfig()
     
     # Run pipeline
     try:
-        result, package = run_pipeline(
+        result, package, exec_mode = run_pipeline(
             query,
             config,
             strict=strict,
             enable_sentinel=enable_sentinel,
-            replay_mode=replay_mode,
+            mode=mode,
         )
     except ImportError as e:
         print(f"Import error: {e}", file=sys.stderr)
@@ -309,8 +304,8 @@ def run_cmd(args: Namespace) -> int:
     saved_to = None
     if out_path and package:
         try:
-            modules = _import_agents()
-            save_path = modules["save_pack"](package, out_path)
+            from orchestrator.artifacts.io import save_pack
+            save_path = save_pack(package, out_path)
             saved_to = str(save_path)
             logger.info(f"Saved artifact pack to: {saved_to}")
         except Exception as e:
@@ -320,7 +315,7 @@ def run_cmd(args: Namespace) -> int:
             return EXIT_RUNTIME_ERROR
     
     # Build and print summary
-    summary = build_summary(result, saved_to=saved_to, debug=debug)
+    summary = build_summary(result, exec_mode, saved_to=saved_to, debug=debug)
     
     if output_json:
         print_summary_json(summary)

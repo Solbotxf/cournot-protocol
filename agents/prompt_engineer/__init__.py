@@ -1,34 +1,38 @@
 """
-Prompt Engineer Agent Module.
+Prompt Engineer Agent Module
 
-Exports the Prompt Engineer agent and related components for
-converting user input into structured PromptSpec and ToolPlan.
+Converts user free-text questions into structured PromptSpec and ToolPlan.
+
+Usage:
+    from agents.prompt_engineer import compile_prompt, PromptEngineerLLM, PromptEngineerFallback
+    
+    # Using convenience function (auto-selects based on context)
+    result = compile_prompt(ctx, "Will BTC be above $100k by end of 2025?")
+    prompt_spec, tool_plan = result.output
+    
+    # Using specific agent
+    agent = PromptEngineerLLM()
+    result = agent.run(ctx, "Will BTC be above $100k by end of 2025?")
 """
 
-from .prompt_agent import (
-    CompilationResult,
-    InputParser,
-    NormalizedUserRequest,
-    PromptEngineerAgent,
-    PromptModule,
-    SourceTargetBuilder,
-    StrictPromptCompilerV1,
-    generate_deterministic_id,
-    generate_requirement_id,
+from .agent import (
+    PromptEngineerLLM,
+    PromptEngineerFallback,
+    get_prompt_engineer,
+    compile_prompt,
 )
 
+from .llm_compiler import LLMPromptCompiler
+from .fallback_compiler import FallbackPromptCompiler
+
 __all__ = [
-    # Main agent
-    "PromptEngineerAgent",
-    # Protocol
-    "PromptModule",
-    # Default implementation
-    "StrictPromptCompilerV1",
-    # Utilities
-    "InputParser",
-    "SourceTargetBuilder",
-    "NormalizedUserRequest",
-    "CompilationResult",
-    "generate_deterministic_id",
-    "generate_requirement_id",
+    # Agents
+    "PromptEngineerLLM",
+    "PromptEngineerFallback",
+    # Functions
+    "get_prompt_engineer",
+    "compile_prompt",
+    # Compilers
+    "LLMPromptCompiler",
+    "FallbackPromptCompiler",
 ]

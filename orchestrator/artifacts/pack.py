@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.crypto.hashing import hash_canonical, to_hex
 from core.schemas.verification import CheckResult, VerificationResult, ChallengeRef
 from core.por.proof_of_reasoning import (
     compute_prompt_spec_hash,
@@ -110,16 +109,14 @@ def validate_prompt_spec_hash(package: PoRPackage) -> list[CheckResult]:
             False,
             "PromptSpec.created_at must be None for deterministic hashing",
         ))
-        # Still compute hash for comparison but note the issue
-        computed_hash = to_hex(hash_canonical(package.prompt_spec))
     else:
         checks.append(_make_check(
             "prompt_spec_timestamp",
             True,
             "PromptSpec.created_at is None",
         ))
-        computed_hash = compute_prompt_spec_hash(package.prompt_spec, strict=False)
     
+    computed_hash = compute_prompt_spec_hash(package.prompt_spec, strict=False)
     bundle_hash = package.bundle.prompt_spec_hash
     
     if computed_hash == bundle_hash:
@@ -263,9 +260,8 @@ def validate_evidence_references(package: PoRPackage) -> list[CheckResult]:
     """Validate that trace evidence references exist in evidence bundle."""
     checks: list[CheckResult] = []
     
-    bundle_evidence_ids = set(package.evidence.evidence_ids)
-    trace_evidence_ids = package.trace.get_all_evidence_ids()
-    trace_evidence_ids.update(package.trace.evidence_refs)
+    bundle_evidence_ids = set(item.evidence_id for item in package.evidence.items)
+    trace_evidence_ids = set(package.trace.get_evidence_refs())
     
     invalid_refs = trace_evidence_ids - bundle_evidence_ids
     

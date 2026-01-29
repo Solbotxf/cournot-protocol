@@ -6,6 +6,7 @@ Provides functionality for saving, loading, and validating artifact packs.
 
 from orchestrator.artifacts.manifest import (
     FORMAT_VERSION,
+    PROTOCOL_VERSION,
     REQUIRED_FILES,
     OPTIONAL_FILES,
     ALL_ARTIFACT_FILES,
@@ -47,6 +48,7 @@ from orchestrator.artifacts.pack import (
 __all__ = [
     # Manifest
     "FORMAT_VERSION",
+    "PROTOCOL_VERSION",
     "REQUIRED_FILES",
     "OPTIONAL_FILES",
     "ALL_ARTIFACT_FILES",

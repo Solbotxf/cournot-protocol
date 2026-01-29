@@ -86,14 +86,25 @@ from .prompts import (
 
 # Evidence schemas
 from .evidence import (
-    ContentType,
+    CollectionResult,
     EvidenceBundle,
     EvidenceItem,
-    ProvenanceKind,
-    ProvenanceProof,
-    RetrievalMethod,
-    RetrievalReceipt,
-    SourceDescriptor,
+    Provenance,
+    ProvenanceTier,
+)
+
+from .reasoning import (
+    AuditResult,
+    ConflictRecord,
+    EvidenceRef,
+    ReasoningStep,
+    ReasoningTrace,
+    StepType,
+)
+
+from .proof import (
+    ProofBundle,
+    SentinelReport,
 )
 
 # Verdict schemas

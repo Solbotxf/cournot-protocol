@@ -1,5 +1,5 @@
 """
-Module 09C - CLI Replay Command (Production)
+Module 09C - CLI Replay Command
 
 Replay evidence collection and compare with pack contents.
 
@@ -22,11 +22,8 @@ from typing import Any
 
 from orchestrator.artifacts.io import load_pack, PackIOError
 from orchestrator.pipeline import PoRPackage
-from core.por.proof_of_reasoning import (
-    verify_por_bundle,
-    compute_evidence_root,
-)
-from core.schemas.verification import VerificationResult
+from core.por.proof_of_reasoning import compute_evidence_root
+from core.schemas.verification import VerificationResult, CheckResult
 
 
 logger = logging.getLogger(__name__)
@@ -105,7 +102,7 @@ def replay_evidence(package: PoRPackage, timeout: int = 30) -> tuple[bool, list[
     # Check individual evidence items
     for item in package.evidence.items:
         # Verify item has content
-        if item.content is None:
+        if item.raw_content is None:
             divergences.append({
                 "type": "missing_content",
                 "evidence_id": item.evidence_id,
@@ -113,23 +110,23 @@ def replay_evidence(package: PoRPackage, timeout: int = 30) -> tuple[bool, list[
             })
             logger.warning(f"Evidence item {item.evidence_id} has no content")
         
-        # Verify retrieval receipt
-        if item.retrieval is None:
+        # Verify provenance
+        if item.provenance is None:
             divergences.append({
-                "type": "missing_retrieval",
+                "type": "missing_provenance",
                 "evidence_id": item.evidence_id,
-                "reason": "Evidence item has no retrieval receipt",
+                "reason": "Evidence item has no provenance",
             })
-        elif item.retrieval.response_fingerprint is None:
+        elif item.provenance.content_hash is None:
             divergences.append({
-                "type": "missing_fingerprint",
+                "type": "missing_hash",
                 "evidence_id": item.evidence_id,
-                "reason": "Evidence item has no response fingerprint",
+                "reason": "Evidence item has no content hash",
             })
     
     # In production, we would also:
-    # - Re-fetch from item.source.uri
-    # - Compare response hash with item.retrieval.response_fingerprint
+    # - Re-fetch from item.provenance.source_uri
+    # - Compare response hash with item.provenance.content_hash
     # - Check for content changes
     
     logger.info(f"Replay complete: {len(divergences)} divergences found")
@@ -139,14 +136,42 @@ def replay_evidence(package: PoRPackage, timeout: int = 30) -> tuple[bool, list[
 
 def verify_with_replay(package: PoRPackage) -> tuple[bool, VerificationResult]:
     """Run sentinel verification in replay mode."""
+    from agents import AgentContext
+    from agents.sentinel import build_proof_bundle, verify_proof
+    
     logger.info("Running sentinel verification...")
-    result = verify_por_bundle(
-        package.bundle,
-        prompt_spec=package.prompt_spec,
-        evidence=package.evidence,
-        trace=package.trace,
+    
+    ctx = AgentContext.create_minimal()
+    
+    # Build proof bundle from package
+    proof_bundle = build_proof_bundle(
+        package.prompt_spec,
+        package.tool_plan,
+        package.evidence,
+        package.trace,
+        package.verdict,
+        None,  # execution_log
     )
-    return result.ok, result
+    
+    # Verify
+    result = verify_proof(ctx, proof_bundle)
+    verification_result, report = result.output
+    
+    # Build VerificationResult from report
+    checks = []
+    for cat_name in ["completeness_checks", "hash_checks", "consistency_checks", 
+                     "provenance_checks", "reasoning_checks"]:
+        cat_checks = getattr(report, cat_name, [])
+        for check in cat_checks:
+            checks.append(CheckResult(
+                check_id=check.get("check_id", "unknown"),
+                ok=check.get("passed", False),
+                severity=check.get("severity", "error"),
+                message=check.get("message", ""),
+            ))
+    
+    sentinel_result = VerificationResult(ok=report.verified, checks=checks)
+    return report.verified, sentinel_result
 
 
 def build_summary(
