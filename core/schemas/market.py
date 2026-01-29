@@ -214,16 +214,6 @@ class MarketSpec(BaseModel):
         description="Additional market metadata",
     )
 
-    @model_validator(mode="after")
-    def validate_deadline_in_window(self) -> "MarketSpec":
-        """Ensure resolution deadline is within or at the end of the window."""
-        if self.resolution_deadline > self.resolution_window.end:
-            raise ValueError(
-                f"Resolution deadline ({self.resolution_deadline}) must be <= "
-                f"resolution window end ({self.resolution_window.end})"
-            )
-        return self
-
     @field_validator("resolution_rules", mode="after")
     @classmethod
     def validate_has_rules(cls, v: ResolutionRules) -> ResolutionRules:

@@ -1,7 +1,0 @@
-role: auditor
-purpose: Evidence-grounded reasoning trace instructions
-input_schema_ref: cournot.core.schemas.evidence.EvidenceBundle
-output_schema_ref: cournot.core.por.reasoning_trace.ReasoningTrace
-constraints:
-  - No hallucinated evidence.
-  - Every step must reference evidence IDs.

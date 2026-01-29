@@ -22,6 +22,7 @@ from core.schemas import (
     ToolCallRecord,
     ToolExecutionLog,
     ToolPlan,
+    SourceTarget
 )
 from .adapters import get_adapter
 
@@ -148,6 +149,7 @@ class CollectionEngine:
             return []
         
         target = requirement.source_targets[0]
+        ctx.debug(f"execute requirement with target:{target}")
         evidence = self._fetch_with_retry(ctx, target, requirement.requirement_id, execution_log)
         
         return [evidence] if evidence else []
@@ -200,13 +202,12 @@ class CollectionEngine:
     
     def _fetch_with_retry(
         self,
-        ctx: "AgentContext",
-        target: "SourceTarget",
+        ctx: AgentContext,
+        target: SourceTarget,
         requirement_id: str,
         execution_log: ToolExecutionLog,
     ) -> EvidenceItem | None:
         """Fetch from a source with retries."""
-        from core.schemas import SourceTarget
         
         adapter = get_adapter(target.source_id)
         

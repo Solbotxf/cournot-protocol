@@ -1,7 +1,0 @@
-role: collector
-purpose: Evidence collection & provenance instructions
-input_schema_ref: cournot.core.schemas.transport.ToolPlan
-output_schema_ref: cournot.core.schemas.evidence.EvidenceBundle
-constraints:
-  - Attach provenance proof per item.
-  - Record RetrievalReceipt for each fetch.
