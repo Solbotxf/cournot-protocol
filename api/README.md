@@ -223,6 +223,17 @@ curl -X POST http://localhost:8000/verify \
   -F "enable_sentinel=true"
 ```
 
+### cURL - Step check (for example prompt engineering)
+
+```bash
+curl -X POST http://localhost:8000/step/prompt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_input": "Will BTC be above $100k by end of 2025?",
+    "strict_mode": true
+  }'
+```
+
 ### Python - Run Pipeline
 
 ```python

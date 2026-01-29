@@ -15,7 +15,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import health, run, verify, replay
+from api.routes import health, run, verify, replay, steps
 from api.errors import APIError, api_error_handler, generic_error_handler
 
 
@@ -76,6 +76,7 @@ The `/run` endpoint supports two response formats:
     app.include_router(run.router)
     app.include_router(verify.router)
     app.include_router(replay.router)
+    app.include_router(steps.router)
     
     return app
 
