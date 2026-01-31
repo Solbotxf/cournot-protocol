@@ -2,3 +2,5 @@ venv/
 cournot.json
 code.md
 *.pyc
+.idea
+*.log

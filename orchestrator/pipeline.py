@@ -91,6 +91,10 @@ class PipelineConfig:
     require_llm: bool = False  # Set True to require LLM agents
     require_network: bool = False  # Set True to require network access
     
+    # Audit evidence context limits (to stay under model context, e.g. 128K tokens)
+    max_audit_evidence_chars: int = 300_000
+    max_audit_evidence_items: int = 100
+    
     # Debug
     debug: bool = False
     
@@ -322,6 +326,10 @@ class Pipeline:
         
         state = PipelineState(user_input=user_input)
         state.context = ctx  # Store context in state for steps
+        
+        # Pass audit evidence limits to agents (e.g. Auditor) via context
+        ctx.extra["max_audit_evidence_chars"] = self.config.max_audit_evidence_chars
+        ctx.extra["max_audit_evidence_items"] = self.config.max_audit_evidence_items
         
         steps = self._build_steps(ctx)
         state = self._executor.execute(steps, state)

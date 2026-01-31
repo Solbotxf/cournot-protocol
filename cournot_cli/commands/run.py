@@ -166,6 +166,8 @@ def run_pipeline(
         enable_replay=config.enable_replay,
         require_llm=config.require_llm,
         require_network=config.require_network,
+        max_audit_evidence_chars=config.max_audit_evidence_chars,
+        max_audit_evidence_items=config.max_audit_evidence_items,
     )
     
     # Create pipeline

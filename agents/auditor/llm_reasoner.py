@@ -25,6 +25,14 @@ if TYPE_CHECKING:
     from agents.context import AgentContext
 
 
+# Default limits for evidence JSON to stay under model context (e.g. 128K)
+DEFAULT_MAX_AUDIT_EVIDENCE_CHARS = 300_000
+DEFAULT_MAX_AUDIT_EVIDENCE_ITEMS = 100
+# Token estimation and hard cap for secondary truncation
+DEFAULT_MODEL_CONTEXT_LIMIT = 128_000
+DEFAULT_AUDIT_RESERVE_TOKENS = 15_000
+
+
 class LLMReasoner:
     """
     LLM-based reasoning engine.
@@ -63,14 +71,30 @@ class LLMReasoner:
         if not ctx.llm:
             raise ValueError("LLM client required for LLM reasoning")
         
-        # Prepare evidence for LLM
-        evidence_json = self._prepare_evidence_json(evidence_bundle)
+        # Read audit evidence limits from context (set by pipeline/config)
+        max_chars = ctx.extra.get(
+            "max_audit_evidence_chars", DEFAULT_MAX_AUDIT_EVIDENCE_CHARS
+        )
+        max_items = ctx.extra.get(
+            "max_audit_evidence_items", DEFAULT_MAX_AUDIT_EVIDENCE_ITEMS
+        )
         
-        # Prepare resolution rules
+        # Prepare resolution rules (fixed size)
         rules_text = self._format_resolution_rules(prompt_spec)
-        
-        # Build prompt
         semantics = prompt_spec.prediction_semantics
+        
+        model_limit = ctx.extra.get(
+            "model_context_limit", DEFAULT_MODEL_CONTEXT_LIMIT
+        )
+        reserve_tokens = ctx.extra.get(
+            "audit_reserve_tokens", DEFAULT_AUDIT_RESERVE_TOKENS
+        )
+        target_tokens = model_limit - reserve_tokens
+        
+        # Prepare evidence and build messages; if estimated tokens exceed limit, reduce evidence and retry
+        evidence_json = self._prepare_evidence_json(
+            evidence_bundle, max_chars=max_chars, max_items=max_items, ctx=ctx
+        )
         user_prompt = USER_PROMPT_TEMPLATE.format(
             question=prompt_spec.market.question,
             event_definition=prompt_spec.market.event_definition,
@@ -81,11 +105,34 @@ class LLMReasoner:
             threshold=semantics.threshold or "N/A",
             timeframe=semantics.timeframe or "N/A",
         )
-        
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
+        
+        # Secondary truncation: if estimated tokens exceed target, reduce evidence and rebuild
+        while self._estimate_tokens(messages) > target_tokens and max_chars > 2000:
+            max_chars = max(2000, max_chars // 2)
+            evidence_json = self._prepare_evidence_json(
+                evidence_bundle, max_chars=max_chars, max_items=max_items, ctx=ctx
+            )
+            user_prompt = USER_PROMPT_TEMPLATE.format(
+                question=prompt_spec.market.question,
+                event_definition=prompt_spec.market.event_definition,
+                resolution_rules=rules_text,
+                evidence_json=evidence_json,
+                target_entity=semantics.target_entity,
+                predicate=semantics.predicate,
+                threshold=semantics.threshold or "N/A",
+                timeframe=semantics.timeframe or "N/A",
+            )
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+            ctx.info(
+                f"Audit messages over context limit; reduced evidence to max_chars={max_chars}"
+            )
         
         # Get LLM response
         response = ctx.llm.chat(messages)
@@ -113,10 +160,26 @@ class LLMReasoner:
         
         raise ValueError(f"Failed to generate reasoning trace after {self.MAX_RETRIES + 1} attempts: {last_error}")
     
-    def _prepare_evidence_json(self, bundle: EvidenceBundle) -> str:
-        """Prepare evidence bundle as JSON for LLM."""
+    def _prepare_evidence_json(
+        self,
+        bundle: EvidenceBundle,
+        *,
+        max_chars: int = DEFAULT_MAX_AUDIT_EVIDENCE_CHARS,
+        max_items: int = DEFAULT_MAX_AUDIT_EVIDENCE_ITEMS,
+        ctx: "AgentContext | None" = None,
+    ) -> str:
+        """Prepare evidence bundle as JSON for LLM, with truncation to stay under context limit."""
+        total_bundle_items = len(bundle.items)
+        # Apply item cap: keep first max_items, note the rest
+        items_to_serialize = bundle.items[:max_items]
+        truncated_by_count = total_bundle_items > max_items
+        
         items = []
-        for item in bundle.items:
+        for item in items_to_serialize:
+            # Truncate extracted_fields the same way as parsed_value
+            safe_extracted = {
+                k: self._safe_value(v) for k, v in item.extracted_fields.items()
+            }
             items.append({
                 "evidence_id": item.evidence_id,
                 "requirement_id": item.requirement_id,
@@ -126,33 +189,77 @@ class LLMReasoner:
                 "success": item.success,
                 "error": item.error,
                 "status_code": item.status_code,
-                "extracted_fields": item.extracted_fields,
+                "extracted_fields": safe_extracted,
                 "parsed_value": self._safe_value(item.parsed_value),
             })
         
-        return json.dumps({
+        payload: dict[str, Any] = {
             "bundle_id": bundle.bundle_id,
             "market_id": bundle.market_id,
-            "total_items": len(items),
+            "total_items": total_bundle_items,
             "items": items,
-        }, indent=2)
+        }
+        if truncated_by_count:
+            payload["_truncation_note"] = (
+                f"Only first {max_items} of {total_bundle_items} evidence items shown."
+            )
+        
+        evidence_json = json.dumps(payload, indent=2)
+        truncated_by_size = False
+        
+        # If still over max_chars, reduce by dropping items from the end until under
+        while len(evidence_json) > max_chars and len(items) > 1:
+            truncated_by_size = True
+            items = items[:-1]
+            payload["items"] = items
+            payload["_truncation_note"] = (
+                f"Evidence truncated to {len(items)} items (total {total_bundle_items}) "
+                f"to fit context limit ({max_chars} chars)."
+            )
+            evidence_json = json.dumps(payload, indent=2)
+        
+        if ctx and (truncated_by_count or truncated_by_size):
+            ctx.info(
+                f"Audit evidence truncated: {len(items)} items shown, "
+                f"total_items={total_bundle_items}, json_len={len(evidence_json)}"
+            )
+        
+        return evidence_json
     
     def _safe_value(self, value: Any) -> Any:
-        """Make value JSON-safe."""
+        """Make value JSON-safe and bounded for LLM context."""
         if value is None:
             return None
         if isinstance(value, (str, int, float, bool)):
+            if isinstance(value, str) and len(value) > 500:
+                return value[:500] + "..."
             return value
         if isinstance(value, dict):
-            # Truncate large dicts
+            # Truncate large dicts by size or key count
             if len(str(value)) > 1000:
                 return {"_truncated": True, "keys": list(value.keys())[:10]}
-            return value
+            items = list(value.items())
+            if len(items) > 30:
+                safe = {k: self._safe_value(v) for k, v in items[:30]}
+                safe["_truncated_keys"] = len(items) - 30
+                return safe
+            return {k: self._safe_value(v) for k, v in value.items()}
         if isinstance(value, list):
             if len(value) > 10:
-                return value[:10] + [f"... and {len(value) - 10} more"]
-            return value
+                return [self._safe_value(v) for v in value[:10]] + [
+                    f"... and {len(value) - 10} more"
+                ]
+            return [self._safe_value(v) for v in value]
         return str(value)[:500]
+    
+    def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
+        """Estimate total token count for messages using character heuristic (~4 chars/token)."""
+        total_chars = 0
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, str):
+                total_chars += len(content)
+        return (total_chars + 3) // 4
     
     def _format_resolution_rules(self, prompt_spec: PromptSpec) -> str:
         """Format resolution rules for LLM."""

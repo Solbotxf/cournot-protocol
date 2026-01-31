@@ -25,6 +25,45 @@ from core.schemas import (
 if TYPE_CHECKING:
     from agents.context import AgentContext
 
+# Limits for extracted_fields to keep evidence bundle size under control for audit context
+_MAX_EXTRACTED_FIELD_VALUE_CHARS = 2000
+_MAX_EXTRACTED_FIELDS_KEYS = 50
+
+
+def _truncate_extracted_fields(
+    fields: dict[str, Any],
+    *,
+    max_value_chars: int = _MAX_EXTRACTED_FIELD_VALUE_CHARS,
+    max_keys: int = _MAX_EXTRACTED_FIELDS_KEYS,
+) -> dict[str, Any]:
+    """Truncate extracted_fields to bound size for downstream audit context."""
+    if not fields:
+        return fields
+    items = list(fields.items())[:max_keys]
+    out: dict[str, Any] = {}
+    for k, v in items:
+        out[k] = _truncate_value(v, max_value_chars=max_value_chars)
+    if len(fields) > max_keys:
+        out["_truncated_keys"] = len(fields) - max_keys
+    return out
+
+
+def _truncate_value(value: Any, *, max_value_chars: int = _MAX_EXTRACTED_FIELD_VALUE_CHARS) -> Any:
+    """Recursively truncate a single value for context size."""
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        return value[:max_value_chars] + ("..." if len(value) > max_value_chars else "")
+    if isinstance(value, dict):
+        if len(str(value)) > max_value_chars:
+            return {"_truncated": True, "keys": list(value.keys())[:10]}
+        return {k: _truncate_value(v, max_value_chars=max_value_chars) for k, v in list(value.items())[:20]}
+    if isinstance(value, list):
+        if len(value) > 10:
+            return [_truncate_value(x, max_value_chars=max_value_chars) for x in value[:10]] + [f"... and {len(value) - 10} more"]
+        return [_truncate_value(x, max_value_chars=max_value_chars) for x in value]
+    return str(value)[:max_value_chars]
+
 
 class SourceAdapter(ABC):
     """
@@ -154,6 +193,7 @@ class HttpAdapter(SourceAdapter):
                 content_hash=self._hash_content(response.content),
             )
             
+            extracted_fields = _truncate_extracted_fields(extracted_fields)
             return EvidenceItem(
                 evidence_id=evidence_id,
                 requirement_id=requirement_id,
@@ -405,6 +445,11 @@ class MockAdapter(SourceAdapter):
             # Default mock response
             response_data = {"mock": True, "source": target.source_id}
         
+        extracted = (
+            _truncate_extracted_fields(response_data)
+            if isinstance(response_data, dict)
+            else {}
+        )
         return EvidenceItem(
             evidence_id=evidence_id,
             requirement_id=requirement_id,
@@ -420,7 +465,7 @@ class MockAdapter(SourceAdapter):
             parsed_value=response_data,
             success=True,
             status_code=200,
-            extracted_fields=response_data if isinstance(response_data, dict) else {},
+            extracted_fields=extracted,
         )
 
 
