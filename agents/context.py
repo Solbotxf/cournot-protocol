@@ -201,11 +201,17 @@ class AgentContext:
                 recorder=recorder,
             )
         
-        # Create HTTP client
+        # Create HTTP client with generic browser-like headers (reduces 403 / connection reset)
+        default_headers = {
+            "User-Agent": config.http.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+        }
         http = HttpClient(
             timeout=config.http.timeout,
             recorder=recorder,
-            default_headers={"User-Agent": config.http.user_agent},
+            default_headers=default_headers,
         )
         
         # Choose clock

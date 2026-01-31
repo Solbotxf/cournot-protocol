@@ -30,13 +30,20 @@ class LLMConfig:
             self.api_key = os.getenv(env_var)
 
 
+# Generic browser User-Agent (simulates a real user, not tied to any specific machine).
+_DEFAULT_HTTP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
 @dataclass
 class HttpConfig:
     """Configuration for HTTP client."""
     timeout: float = 30.0
     max_retries: int = 3
     retry_delay: float = 1.0
-    user_agent: str = "cournot-protocol/1.0"
+    user_agent: str = _DEFAULT_HTTP_USER_AGENT
 
 
 @dataclass
