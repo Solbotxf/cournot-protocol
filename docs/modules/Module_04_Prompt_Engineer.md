@@ -154,6 +154,10 @@ Each DataRequirement MUST include:
 	•	min_provenance_tier
 	•	expected_fields (optional, can be in extra): what JSON keys or text patterns are needed
 
+SourceTarget may include:
+	•	operation: "fetch" | "search" (optional; omit for direct fetch). For news/government sites where the homepage rarely has the needed info, use operation "search" and provide search_query (e.g. site:english.www.gov.cn "Keir Starmer" visit China).
+	•	search_query: str (optional; when operation is "search", the search query string).
+
 Example for “official CPI number”:
 	•	target1: uri="https://api.bls.gov/publicAPI/v2/timeseries/data/CUUR0000SA0" method POST expected json
 	•	target2: uri="https://www.bls.gov/cpi/" method GET expected html (fallback)

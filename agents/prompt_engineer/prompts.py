@@ -44,7 +44,9 @@ You MUST output valid JSON matching the exact schema specified. No explanations,
           "source_id": "http|web|polymarket|exchange",
           "uri": "https://...",
           "method": "GET|POST",
-          "expected_content_type": "json|text|html"
+          "expected_content_type": "json|text|html",
+          "operation": "fetch|search",
+          "search_query": "site:example.com \"exact phrase\""
         }
       ],
       "selection_policy": {
@@ -76,6 +78,8 @@ You MUST output valid JSON matching the exact schema specified. No explanations,
 ```
 
 ## Source Selection Guidelines
+
+- **operation** (optional): "fetch" or "search". Omit for direct fetch. For news/government sites (e.g. un.org, fmprc.gov.cn) where the homepage rarely has the needed info, prefer **operation: "search"** and provide **search_query** (e.g. site:english.www.gov.cn "Keir Starmer" visit China).
 
 For price/financial data:
 - Prefer exchange APIs (Coinbase, Binance, CoinGecko)

@@ -32,6 +32,7 @@ HttpMethod = Literal["GET", "POST", "RPC", "WS", "OTHER"]
 ContentTypeHint = Literal["json", "text", "html", "bytes"]
 SelectionStrategy = Literal["single_best", "multi_source_quorum", "fallback_chain"]
 TieBreakerStrategy = Literal["highest_provenance", "source_priority", "most_recent"]
+SourceOperation = Literal["fetch", "search"]
 
 
 class SourceTarget(BaseModel):
@@ -45,6 +46,7 @@ class SourceTarget(BaseModel):
     - uri MUST be a fully specified absolute URI when applicable
     - uri is treated as an opaque string for commitments (no normalization)
     - Order of SourceTargets in a list is semantically meaningful (priority/fallback)
+    - operation is None or "fetch": direct request to uri; "search": execute search (e.g. via search_query) then fetch results.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -88,6 +90,14 @@ class SourceTarget(BaseModel):
         default=None,
         description="Cache TTL hint in seconds. None means no caching preference.",
         ge=0,
+    )
+    operation: SourceOperation | None = Field(
+        default=None,
+        description="How to obtain data: None or 'fetch' = direct request to uri; 'search' = execute search (e.g. via search_query or site/uri) then fetch results.",
+    )
+    search_query: str | None = Field(
+        default=None,
+        description="When operation is 'search', the search query string (e.g. site:example.com \"exact phrase\"). Optional; query may also be in params/uri.",
     )
     notes: str | None = Field(
         default=None,

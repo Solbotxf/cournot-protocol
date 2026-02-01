@@ -15,6 +15,7 @@ import json
 import re
 from abc import ABC, abstractmethod
 from typing import Any, TYPE_CHECKING
+from urllib.parse import quote_plus
 
 from core.schemas import (
     EvidenceItem,
@@ -98,9 +99,11 @@ class SourceAdapter(ABC):
         """
         ...
     
-    def _generate_evidence_id(self, requirement_id: str, source_id: str, uri: str) -> str:
-        """Generate a deterministic evidence ID."""
-        content = f"{requirement_id}:{source_id}:{uri}"
+    def _generate_evidence_id(self, requirement_id: str, target: SourceTarget) -> str:
+        """Generate a deterministic evidence ID including operation and search_query for PoR fingerprint."""
+        op = target.operation if target.operation else "fetch"
+        sq = target.search_query if target.search_query else ""
+        content = f"{requirement_id}:{target.source_id}:{target.uri}:{op}:{sq}"
         hash_bytes = hashlib.sha256(content.encode()).digest()
         return f"ev_{hash_bytes[:8].hex()}"
     
@@ -128,8 +131,11 @@ class HttpAdapter(SourceAdapter):
         target: SourceTarget,
         requirement_id: str,
     ) -> EvidenceItem:
-        """Fetch data via HTTP."""
-        evidence_id = self._generate_evidence_id(requirement_id, target.source_id, target.uri)
+        """Fetch data via HTTP. When operation is 'search', builds a search URL from search_query then fetches."""
+        evidence_id = self._generate_evidence_id(requirement_id, target)
+        effective_uri = target.uri
+        if target.operation == "search" and target.search_query:
+            effective_uri = f"https://www.google.com/search?q={quote_plus(target.search_query)}"
         
         # Check if we have HTTP client
         if not ctx.http:
@@ -146,18 +152,18 @@ class HttpAdapter(SourceAdapter):
             )
         
         try:
-            # Execute request
+            # Execute request (use effective_uri for search operation)
             method = target.method if target.method in ("GET", "POST") else "GET"
             
             if method == "GET":
                 response = ctx.http.get(
-                    target.uri,
+                    effective_uri,
                     headers=target.headers,
                     params=target.params,
                 )
             else:
                 response = ctx.http.post(
-                    target.uri,
+                    effective_uri,
                     headers=target.headers,
                     params=target.params,
                     json=target.body if isinstance(target.body, dict) else None,
@@ -183,11 +189,11 @@ class HttpAdapter(SourceAdapter):
             else:
                 parsed_value = raw_content
             
-            # Build provenance
+            # Build provenance (source_uri remains the spec uri for commitments)
             provenance = Provenance(
                 source_id=target.source_id,
                 source_uri=target.uri,
-                tier=self._determine_tier(target.source_id, target.uri),
+                tier=self._determine_tier(target.source_id, effective_uri),
                 fetched_at=ctx.now(),
                 receipt_id=response.receipt_id,
                 content_hash=self._hash_content(response.content),
@@ -432,7 +438,7 @@ class MockAdapter(SourceAdapter):
         requirement_id: str,
     ) -> EvidenceItem:
         """Return mock data."""
-        evidence_id = self._generate_evidence_id(requirement_id, target.source_id, target.uri)
+        evidence_id = self._generate_evidence_id(requirement_id, target)
         
         # Find matching response
         response_data = None

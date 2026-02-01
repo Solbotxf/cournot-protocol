@@ -198,6 +198,16 @@ class TestStrictPromptCompiler:
             for target in req.source_targets:
                 assert target.uri
                 assert target.method
+
+    def test_fallback_compiler_source_targets_have_operation_none(self):
+        """Fallback compiler does not set operation/search_query; they remain None (fetch)."""
+        compiler = StrictPromptCompilerV1()
+        user_input = "Will BTC close above $100,000 on 2026-12-31? Use Coinbase."
+        prompt_spec, _ = compiler.compile(user_input)
+        for req in prompt_spec.data_requirements:
+            for target in req.source_targets:
+                assert target.operation is None
+                assert target.search_query is None
     
     def test_compile_missing_timeframe_records_assumption(self):
         """Missing timeframe records assumption and uses default."""

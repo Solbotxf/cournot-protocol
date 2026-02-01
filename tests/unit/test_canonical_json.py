@@ -551,6 +551,34 @@ class TestSourceTarget:
         assert parsed["method"] == "POST"
         assert parsed["body"]["jsonrpc"] == "2.0"
 
+    def test_source_target_without_operation_excluded_from_canonical(self):
+        """SourceTarget with operation/search_query None should not include them in canonical (backward compatible hash)."""
+        target = SourceTarget(
+            source_id="http",
+            uri="https://api.example.com/data",
+        )
+        result = dumps_canonical(target)
+        parsed = json.loads(result)
+        assert "operation" not in parsed
+        assert "search_query" not in parsed
+
+    def test_source_target_with_operation_search_query_serialization(self):
+        """SourceTarget with operation and search_query should serialize and round-trip correctly."""
+        target = SourceTarget(
+            source_id="http",
+            uri="https://www.example.org",
+            operation="search",
+            search_query='site:example.org "exact phrase"',
+        )
+        result = dumps_canonical(target)
+        parsed = json.loads(result)
+        assert parsed.get("operation") == "search"
+        assert parsed.get("search_query") == 'site:example.org "exact phrase"'
+        # Round-trip
+        loaded = SourceTarget.model_validate(parsed)
+        assert loaded.operation == "search"
+        assert loaded.search_query == 'site:example.org "exact phrase"'
+
 
 class TestSelectionPolicy:
     """Tests for SelectionPolicy schema."""

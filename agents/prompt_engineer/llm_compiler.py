@@ -237,6 +237,8 @@ class LLMPromptCompiler:
                     expected_content_type=t.get("expected_content_type", "json"),
                     headers=t.get("headers", {}),
                     params=t.get("params", {}),
+                    operation=t.get("operation"),
+                    search_query=t.get("search_query"),
                 )
                 for t in targets_data
                 if t.get("uri")  # Only include targets with URIs

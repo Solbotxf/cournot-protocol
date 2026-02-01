@@ -83,6 +83,8 @@ New schemas
     •	body: dict | str | None = None
     •	auth_ref: str | None = None — reference only; secrets never stored in schemas.
     •	cache_ttl_seconds: int | None = None
+    •	operation: Literal["fetch","search"] | None = None — how to obtain data: None or "fetch" = direct request to uri; "search" = execute search (e.g. via search_query or site/uri) then fetch. Excluded from canonical when None for backward-compatible prompt_spec_hash.
+    •	search_query: str | None = None — when operation is "search", the search query string (e.g. site:example.com "exact phrase"). Optional; query may also be in params/uri.
     •	notes: str | None = None
   •	SelectionPolicy
     •	strategy: Literal["single_best","multi_source_quorum","fallback_chain"]
@@ -98,6 +100,7 @@ DataRequirement extension
 Validation requirements
 	•	source_targets MUST preserve order. The order is semantically meaningful (priority/fallback order) and MUST NOT be sorted.
 	•	Each SourceTarget.uri MUST be treated as an opaque string for commitments; no normalization (e.g., stripping trailing slashes, reordering query params) is permitted within the schema layer.
+	•	operation and search_query participate in canonical serialization when present; when None they are excluded (exclude_none), so existing prompt_specs without these fields retain the same prompt_spec_hash.
 
 ⸻
 
