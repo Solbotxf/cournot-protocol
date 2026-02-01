@@ -31,6 +31,9 @@ DEFAULT_MAX_AUDIT_EVIDENCE_ITEMS = 100
 # Token estimation and hard cap for secondary truncation
 DEFAULT_MODEL_CONTEXT_LIMIT = 128_000
 DEFAULT_AUDIT_RESERVE_TOKENS = 15_000
+# Primary evidence (e.g. HTML) needs more chars than metadata; keep body content for status pages
+MAX_PRIMARY_EVIDENCE_CHARS = 12_000
+MAX_NESTED_VALUE_CHARS = 2_000
 
 
 class LLMReasoner:
@@ -190,7 +193,10 @@ class LLMReasoner:
                 "error": item.error,
                 "status_code": item.status_code,
                 "extracted_fields": safe_extracted,
-                "parsed_value": self._safe_value(item.parsed_value),
+                "parsed_value": self._safe_value(
+                    item.parsed_value,
+                    max_str_chars=MAX_PRIMARY_EVIDENCE_CHARS,
+                ),
             })
         
         payload: dict[str, Any] = {
@@ -226,13 +232,45 @@ class LLMReasoner:
         
         return evidence_json
     
-    def _safe_value(self, value: Any) -> Any:
-        """Make value JSON-safe and bounded for LLM context."""
+    def _safe_value(
+        self,
+        value: Any,
+        *,
+        max_str_chars: int = MAX_NESTED_VALUE_CHARS,
+    ) -> Any:
+        """Make value JSON-safe and bounded for LLM context.
+
+        Use max_str_chars=MAX_PRIMARY_EVIDENCE_CHARS for parsed_value (HTML, etc.)
+        so body content is retained; use default for metadata/nested values.
+        """
         if value is None:
             return None
         if isinstance(value, (str, int, float, bool)):
-            if isinstance(value, str) and len(value) > 500:
-                return value[:500] + "..."
+            if isinstance(value, str) and len(value) > max_str_chars:
+                # For HTML, extract body and convert to plain text to avoid unescaped
+                # quotes in markup breaking LLM output JSON (Unterminated string)
+                body_match = re.search(
+                    r"<body[^>]*>(.*?)</body>",
+                    value,
+                    re.DOTALL | re.IGNORECASE,
+                )
+                if body_match:
+                    body = body_match.group(1).strip()
+                    # Strip tags so we pass plain text; reduces " and < that can break
+                    # LLM-generated JSON when it echoes evidence
+                    body = re.sub(r"<[^>]+>", " ", body)
+                    body = re.sub(r"\s+", " ", body).strip()
+                    if len(body) > max_str_chars:
+                        return body[:max_str_chars] + "..."
+                    return body
+                # Not HTML or no body: truncate; strip tags if markup to reduce " in output
+                if "<" in value and ">" in value:
+                    plain = re.sub(r"<[^>]+>", " ", value)
+                    plain = re.sub(r"\s+", " ", plain).strip()
+                    snippet = plain[:max_str_chars]
+                else:
+                    snippet = value[:max_str_chars]
+                return snippet + "..."
             return value
         if isinstance(value, dict):
             # Truncate large dicts by size or key count
@@ -240,17 +278,27 @@ class LLMReasoner:
                 return {"_truncated": True, "keys": list(value.keys())[:10]}
             items = list(value.items())
             if len(items) > 30:
-                safe = {k: self._safe_value(v) for k, v in items[:30]}
+                safe = {
+                    k: self._safe_value(v, max_str_chars=max_str_chars)
+                    for k, v in items[:30]
+                }
                 safe["_truncated_keys"] = len(items) - 30
                 return safe
-            return {k: self._safe_value(v) for k, v in value.items()}
+            return {
+                k: self._safe_value(v, max_str_chars=max_str_chars)
+                for k, v in value.items()
+            }
         if isinstance(value, list):
             if len(value) > 10:
-                return [self._safe_value(v) for v in value[:10]] + [
-                    f"... and {len(value) - 10} more"
-                ]
-            return [self._safe_value(v) for v in value]
-        return str(value)[:500]
+                return [
+                    self._safe_value(v, max_str_chars=max_str_chars)
+                    for v in value[:10]
+                ] + [f"... and {len(value) - 10} more"]
+            return [
+                self._safe_value(v, max_str_chars=max_str_chars)
+                for v in value
+            ]
+        return str(value)[:max_str_chars]
     
     def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
         """Estimate total token count for messages using character heuristic (~4 chars/token)."""
@@ -270,19 +318,45 @@ class LLMReasoner:
         return "\n".join(lines)
     
     def _extract_json(self, text: str) -> dict[str, Any]:
-        """Extract JSON from LLM response."""
-        # Try to extract from code block
-        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-        if json_match:
-            return json.loads(json_match.group(1).strip())
-        
-        # Try bare JSON
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            return json.loads(text[start:end])
-        
-        return json.loads(text.strip())
+        """Extract JSON from LLM response, with repair for common LLM errors."""
+        def parse(s: str) -> dict[str, Any]:
+            return json.loads(s)
+
+        def extract_candidate(s: str) -> str:
+            json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", s)
+            if json_match:
+                return json_match.group(1).strip()
+            start = s.find("{")
+            end = s.rfind("}") + 1
+            if start >= 0 and end > start:
+                return s[start:end]
+            return s.strip()
+
+        candidate = extract_candidate(text)
+        try:
+            return parse(candidate)
+        except json.JSONDecodeError as e:
+            if "Unterminated string" not in str(e):
+                raise
+            # LLM often truncates or echoes evidence; close string then structure
+            repaired = candidate.rstrip()
+            if repaired.endswith("\\"):
+                repaired = repaired[:-1]
+            if not repaired.endswith('"') and '"' in repaired:
+                repaired = repaired + '"'
+            # Close nested structure: " then } ] } (string, inner object, array, outer object)
+            for suffix in ["}]}", "}]", "}", ""]:
+                try:
+                    return parse(repaired + suffix)
+                except json.JSONDecodeError:
+                    pass
+            for _ in range(6):
+                repaired = repaired + "}]"
+                try:
+                    return parse(repaired)
+                except json.JSONDecodeError:
+                    pass
+            raise
     
     def _build_trace(
         self,
