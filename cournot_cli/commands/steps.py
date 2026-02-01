@@ -53,9 +53,9 @@ def save_json_artifact(path: Path, artifact: Any) -> None:
 
 
 def create_context(config: CLIConfig):
-    """Create agent context from config."""
-    from agents import AgentContext
-    return AgentContext.create_minimal()
+    """Create agent context from config (HTTP/LLM when configured)."""
+    from cournot_cli.commands.run import create_agent_context
+    return create_agent_context(config)
 
 
 def select_agent(registry, step, ctx, agent_name: str | None):

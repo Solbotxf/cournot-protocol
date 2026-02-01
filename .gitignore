@@ -4,3 +4,4 @@ code.md
 *.pyc
 .idea
 *.log
+tmp

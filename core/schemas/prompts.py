@@ -219,9 +219,9 @@ class DataRequirement(BaseModel):
         ge=0,
     )
     
-    expected_fields:list[str] = Field(
+    expected_fields: list[str] | None = Field(
         default=None,
-        description="expected fields",
+        description="Optional list of expected JSON keys; None means no filtering.",
     )
 
     # Legacy field kept for backward compatibility
