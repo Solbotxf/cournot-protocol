@@ -2,6 +2,7 @@ venv/
 cournot.json
 code.md
 *.pyc
+__pycache__/
 .idea
 *.log
 tmp

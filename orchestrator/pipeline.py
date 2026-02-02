@@ -310,6 +310,51 @@ class Pipeline:
             logger.warning(f"Agent selection failed: {e}")
             return None
     
+    def run_from_prompt(
+        self,
+        prompt_spec: PromptSpec,
+        tool_plan: ToolPlan,
+    ) -> RunResult:
+        """
+        Execute pipeline steps 2-5 from a pre-built PromptSpec and ToolPlan.
+
+        Skips prompt compilation (step 1) and sentinel verification (step 6).
+        Runs: evidence collection → audit → judge → build PoR bundle.
+
+        Args:
+            prompt_spec: Compiled prompt specification
+            tool_plan: Tool execution plan
+
+        Returns:
+            RunResult with all artifacts from steps 2-5
+        """
+        ctx = self._get_context()
+
+        # Pre-populate state with prompt step output
+        state = PipelineState(user_input="")
+        state.context = ctx
+        state.prompt_spec = prompt_spec
+        state.tool_plan = tool_plan
+
+        # Pass audit evidence limits to agents via context
+        ctx.extra["max_audit_evidence_chars"] = self.config.max_audit_evidence_chars
+        ctx.extra["max_audit_evidence_items"] = self.config.max_audit_evidence_items
+
+        # Build only steps 2-5
+        overrides = self.config.step_overrides
+        steps = [
+            make_step("evidence_collection",
+                lambda s: self._step_evidence_collection(s, overrides.collector)),
+            make_step("audit",
+                lambda s: self._step_audit(s, overrides.auditor)),
+            make_step("judge",
+                lambda s: self._step_judge(s, overrides.judge)),
+            make_step("build_por_bundle", self._step_build_por_bundle),
+        ]
+
+        state = self._executor.execute(steps, state)
+        return self._state_to_result(state)
+
     def run(self, user_input: str) -> RunResult:
         """Execute the full pipeline."""
         ctx = self._get_context()
