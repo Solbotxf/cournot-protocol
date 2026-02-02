@@ -19,6 +19,12 @@ ENV_PREFIX = "COURNOT_"
 
 
 @dataclass
+class SerperConfig:
+    """Configuration for Serper API (search operations via google.serper.dev)."""
+    api_key: str = ""
+
+
+@dataclass
 class CollectorConfig:
     """Configuration for the Collector agent."""
     default_timeout_s: int = 20
@@ -58,8 +64,15 @@ class CLIConfig:
     pipeline_timeout: int = 300
     replay_timeout: int = 30
     
+    # Audit evidence context limits (to stay under model context, e.g. 128K tokens)
+    max_audit_evidence_chars: int = 300_000
+    max_audit_evidence_items: int = 100
+    
     # Collector settings
     collector: CollectorConfig = field(default_factory=CollectorConfig)
+
+    # Serper API (for search operations in Collector)
+    serper: SerperConfig = field(default_factory=SerperConfig)
     
     # LLM settings
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -99,6 +112,12 @@ def load_config_from_env() -> CLIConfig:
         config.pipeline_timeout = int(os.getenv(f"{ENV_PREFIX}PIPELINE_TIMEOUT", "300"))
     if os.getenv(f"{ENV_PREFIX}REPLAY_TIMEOUT"):
         config.replay_timeout = int(os.getenv(f"{ENV_PREFIX}REPLAY_TIMEOUT", "30"))
+    
+    # Audit evidence limits
+    if os.getenv(f"{ENV_PREFIX}MAX_AUDIT_EVIDENCE_CHARS"):
+        config.max_audit_evidence_chars = int(os.getenv(f"{ENV_PREFIX}MAX_AUDIT_EVIDENCE_CHARS", "300000"))
+    if os.getenv(f"{ENV_PREFIX}MAX_AUDIT_EVIDENCE_ITEMS"):
+        config.max_audit_evidence_items = int(os.getenv(f"{ENV_PREFIX}MAX_AUDIT_EVIDENCE_ITEMS", "100"))
     
     # Collector settings
     if os.getenv(f"{ENV_PREFIX}COLLECTOR_TIMEOUT"):
@@ -145,6 +164,10 @@ def load_config_from_file(path: Path) -> CLIConfig:
     config.pipeline_timeout = data.get("pipeline_timeout", config.pipeline_timeout)
     config.replay_timeout = data.get("replay_timeout", config.replay_timeout)
     
+    # Audit evidence limits
+    config.max_audit_evidence_chars = data.get("max_audit_evidence_chars", config.max_audit_evidence_chars)
+    config.max_audit_evidence_items = data.get("max_audit_evidence_items", config.max_audit_evidence_items)
+    
     # Collector settings
     collector_data = data.get("collector", {})
     config.collector = CollectorConfig(
@@ -152,6 +175,12 @@ def load_config_from_file(path: Path) -> CLIConfig:
         strict_tier_policy=collector_data.get("strict_tier_policy", True),
         include_timestamps=collector_data.get("include_timestamps", False),
         collector_id=collector_data.get("collector_id", "collector_v1"),
+    )
+
+    # Serper API (supports legacy google_cse key for api_key)
+    serper_data = data.get("serper", {}) or data.get("google_cse", {})
+    config.serper = SerperConfig(
+        api_key=serper_data.get("api_key", ""),
     )
     
     # LLM settings
@@ -215,6 +244,10 @@ def load_config(config_path: Path | None = None) -> CLIConfig:
         config.log_file = env_config.log_file
     if os.getenv(f"{ENV_PREFIX}LLM_PROVIDER"):
         config.llm = env_config.llm
+    if os.getenv(f"{ENV_PREFIX}MAX_AUDIT_EVIDENCE_CHARS"):
+        config.max_audit_evidence_chars = env_config.max_audit_evidence_chars
+    if os.getenv(f"{ENV_PREFIX}MAX_AUDIT_EVIDENCE_ITEMS"):
+        config.max_audit_evidence_items = env_config.max_audit_evidence_items
     
     return config
 
@@ -230,6 +263,8 @@ def get_default_config_template() -> str:
   "require_network": false,
   "pipeline_timeout": 300,
   "replay_timeout": 30,
+  "max_audit_evidence_chars": 300000,
+  "max_audit_evidence_items": 100,
   "log_level": "INFO",
   "log_file": null,
   "collector": {
@@ -237,6 +272,9 @@ def get_default_config_template() -> str:
     "strict_tier_policy": true,
     "include_timestamps": false,
     "collector_id": "collector_v1"
+  },
+  "serper": {
+    "api_key": ""
   },
   "llm": {
     "provider": "",

@@ -9,7 +9,7 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
-from agents.base_agent import AgentContext
+from agents.context import AgentContext
 from core.schemas import PromptSpec, SourceTarget, ToolPlan
 
 

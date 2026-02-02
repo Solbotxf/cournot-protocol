@@ -113,8 +113,9 @@ Recommended split:
 Store request_id inside RetrievalReceipt.request_fingerprint.
 
 Rules
-	•	request_fingerprint: deterministic from SourceTarget fields (uri/method/params/body/headers subset)
+	•	request_fingerprint: deterministic from SourceTarget fields (uri/method/params/body/headers subset, and operation/search_query when present)
 	•	response_fingerprint: deterministic hash of raw response bytes (or canonical JSON if JSON)
+	•	evidence_id: deterministic from (requirement_id, source_id, uri, operation or "fetch", search_query or ""), so same URI with different operation or search_query yields different evidence_id
 	•	evidence_id: deterministic from (requirement_id, request_fingerprint, response_fingerprint)
 
 5.2 Ordering

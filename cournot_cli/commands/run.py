@@ -58,6 +58,16 @@ class RunSummary:
         return d
 
 
+def _runtime_config_from_cli(config: CLIConfig):
+    """Build RuntimeConfig from CLIConfig for agent context (serper, etc.)."""
+    from core.config import RuntimeConfig, SerperConfig
+    runtime = RuntimeConfig.from_env()
+    runtime.serper = SerperConfig(
+        api_key=config.serper.api_key or None,
+    )
+    return runtime
+
+
 def create_agent_context(config: CLIConfig):
     """
     Create an AgentContext based on configuration.
@@ -69,9 +79,20 @@ def create_agent_context(config: CLIConfig):
         AgentContext instance
     """
     from agents import AgentContext
+
+    runtime_config = _runtime_config_from_cli(config)
     
-    # Start with minimal context
+    # Start with minimal context, with config for serper etc.
     ctx = AgentContext.create_minimal()
+    ctx = AgentContext(
+        llm=ctx.llm,
+        http=ctx.http,
+        recorder=ctx.recorder,
+        config=runtime_config,
+        clock=ctx.clock,
+        cache=ctx.cache,
+        logger=ctx.logger,
+    )
     
     # Add LLM if configured
     if config.llm.provider and config.llm.api_key:
@@ -89,6 +110,7 @@ def create_agent_context(config: CLIConfig):
                 http=ctx.http,
                 recorder=ctx.recorder,
                 config=ctx.config,
+                clock=ctx.clock,
                 cache=ctx.cache,
                 logger=ctx.logger,
             )
@@ -105,6 +127,7 @@ def create_agent_context(config: CLIConfig):
                 http=http,
                 recorder=ctx.recorder,
                 config=ctx.config,
+                clock=ctx.clock,
                 cache=ctx.cache,
                 logger=ctx.logger,
             )
@@ -166,6 +189,8 @@ def run_pipeline(
         enable_replay=config.enable_replay,
         require_llm=config.require_llm,
         require_network=config.require_network,
+        max_audit_evidence_chars=config.max_audit_evidence_chars,
+        max_audit_evidence_items=config.max_audit_evidence_items,
     )
     
     # Create pipeline

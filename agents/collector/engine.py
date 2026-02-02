@@ -213,14 +213,18 @@ class CollectionEngine:
         
         for attempt in range(self.max_retries + 1):
             # Record tool call start
+            input_data = {
+                "uri": target.uri,
+                "method": target.method,
+                "requirement_id": requirement_id,
+                "attempt": attempt + 1,
+            }
+            if target.operation == "search" and target.search_query:
+                input_data["operation"] = "search"
+                input_data["search_query"] = target.search_query
             call_record = ToolCallRecord(
                 tool=f"fetch:{target.source_id}",
-                input={
-                    "uri": target.uri,
-                    "method": target.method,
-                    "requirement_id": requirement_id,
-                    "attempt": attempt + 1,
-                },
+                input=input_data,
                 started_at=ctx.now().isoformat(),
             )
             
