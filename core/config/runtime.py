@@ -10,7 +10,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from pathlib import Path
-import yaml
 
 
 @dataclass
@@ -44,6 +43,14 @@ class HttpConfig:
     max_retries: int = 3
     retry_delay: float = 1.0
     user_agent: str = _DEFAULT_HTTP_USER_AGENT
+
+
+@dataclass
+class SerperConfig:
+    """Configuration for Serper API (search operations via google.serper.dev)."""
+    api_key: Optional[str] = None
+
+
 
 
 @dataclass
@@ -102,6 +109,7 @@ class RuntimeConfig:
     http: HttpConfig = field(default_factory=HttpConfig)
     agents: AgentsConfig = field(default_factory=AgentsConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    serper: SerperConfig = field(default_factory=SerperConfig)
     extra: dict[str, Any] = field(default_factory=dict)
     
     @classmethod
@@ -114,9 +122,7 @@ class RuntimeConfig:
         - COURNOT_LLM_MODEL
         - COURNOT_STRICT_MODE
         - COURNOT_DEBUG
-        - OPENAI_API_KEY
-        - ANTHROPIC_API_KEY
-        - GOOGLE_API_KEY
+        - SERPER_API_KEY
         """
         llm = LLMConfig(
             provider=os.getenv("COURNOT_LLM_PROVIDER", "openai"),
@@ -127,12 +133,17 @@ class RuntimeConfig:
             strict_mode=os.getenv("COURNOT_STRICT_MODE", "true").lower() == "true",
             debug=os.getenv("COURNOT_DEBUG", "false").lower() == "true",
         )
+
+        serper = SerperConfig(
+            api_key=os.getenv("SERPER_API_KEY") or None,
+        )
         
-        return cls(llm=llm, pipeline=pipeline)
+        return cls(llm=llm, pipeline=pipeline, serper=serper)
     
     @classmethod
     def from_yaml(cls, path: str | Path) -> "RuntimeConfig":
         """Load configuration from a YAML file."""
+        import yaml
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
@@ -149,6 +160,11 @@ class RuntimeConfig:
         http_data = data.get("http", {})
         agents_data = data.get("agents", {})
         pipeline_data = data.get("pipeline", {})
+        serper_data = data.get("serper", {}) or data.get("google_cse", {})
+        if isinstance(serper_data, dict):
+            serper = SerperConfig(api_key=serper_data.get("api_key"))
+        else:
+            serper = SerperConfig()
         
         llm = LLMConfig(**llm_data) if llm_data else LLMConfig()
         http = HttpConfig(**http_data) if http_data else HttpConfig()
@@ -166,6 +182,7 @@ class RuntimeConfig:
             http=http,
             agents=agents,
             pipeline=pipeline,
+            serper=serper,
             extra=data.get("extra", {}),
         )
     
@@ -188,6 +205,9 @@ class RuntimeConfig:
                 "enable_sentinel_verify": self.pipeline.enable_sentinel_verify,
                 "deterministic_timestamps": self.pipeline.deterministic_timestamps,
                 "debug": self.pipeline.debug,
+            },
+            "serper": {
+                "api_key": self.serper.api_key,
             },
             "extra": self.extra,
         }

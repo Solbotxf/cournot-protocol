@@ -6,12 +6,16 @@ Each adapter knows how to:
 1. Execute requests for its source type
 2. Parse responses into evidence items
 3. Determine provenance tier
+
+For search operations (operation='search'), uses Serper API (google.serper.dev)
+when SERPER_API_KEY is set, to obtain structured search results.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any, TYPE_CHECKING
@@ -25,6 +29,9 @@ from core.schemas import (
 
 if TYPE_CHECKING:
     from agents.context import AgentContext
+
+# Serper API endpoint
+_SERPER_URL = "https://google.serper.dev/search"
 
 # Limits for extracted_fields to keep evidence bundle size under control for audit context
 _MAX_EXTRACTED_FIELD_VALUE_CHARS = 2000
@@ -131,13 +138,48 @@ class HttpAdapter(SourceAdapter):
         target: SourceTarget,
         requirement_id: str,
     ) -> EvidenceItem:
-        """Fetch data via HTTP. When operation is 'search', builds a search URL from search_query then fetches."""
+        """Fetch data via HTTP. When operation is 'search', uses Google Custom Search API if configured."""
         evidence_id = self._generate_evidence_id(requirement_id, target)
-        effective_uri = target.uri
+
+        # Use Serper API for search operations when configured
         if target.operation == "search" and target.search_query:
-            effective_uri = f"https://www.google.com/search?q={quote_plus(target.search_query)}"
-        
-        # Check if we have HTTP client
+            return self._fetch_via_serper(ctx, target, requirement_id, evidence_id)
+
+        # Direct HTTP fetch for non-search operations
+        return self._fetch_direct(ctx, target, requirement_id, evidence_id)
+
+    def _get_serper_config(self, ctx: "AgentContext") -> str:
+        """Get Serper API key from config or environment."""
+        api_key = ""
+        if ctx.config and hasattr(ctx.config, "serper") and ctx.config.serper:
+            api_key = (ctx.config.serper.api_key or "").strip()
+        if not api_key:
+            api_key = os.getenv("SERPER_API_KEY", "").strip()
+        return api_key
+
+    def _fetch_via_serper(
+        self,
+        ctx: "AgentContext",
+        target: SourceTarget,
+        requirement_id: str,
+        evidence_id: str,
+    ) -> EvidenceItem:
+        """Fetch search results via Serper API (google.serper.dev)."""
+        api_key = self._get_serper_config(ctx)
+
+        if not api_key:
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement_id,
+                provenance=Provenance(
+                    source_id=target.source_id,
+                    source_uri=target.uri,
+                    tier=0,
+                ),
+                success=False,
+                error="Serper API not configured. Set serper.api_key in config file, or SERPER_API_KEY environment variable.",
+            )
+
         if not ctx.http:
             return EvidenceItem(
                 evidence_id=evidence_id,
@@ -150,11 +192,162 @@ class HttpAdapter(SourceAdapter):
                 success=False,
                 error="HTTP client not available",
             )
-        
+
         try:
-            # Execute request (use effective_uri for search operation)
+            headers = {
+                "X-API-KEY": api_key,
+                "Content-Type": "application/json",
+            }
+            if target.headers:
+                headers.update(target.headers)
+
+            response = ctx.http.post(
+                _SERPER_URL,
+                headers=headers,
+                json={"q": target.search_query},
+                timeout=30.0,
+            )
+
+            if not response.ok:
+                err_detail = ""
+                try:
+                    err_body = response.json()
+                    if isinstance(err_body, dict) and "message" in err_body:
+                        err_detail = f" - {err_body.get('message', '')}"
+                    elif isinstance(err_body, dict) and "error" in err_body:
+                        err_detail = f" - {err_body.get('error', '')}"
+                except Exception:
+                    pass
+                if not err_detail and response.text:
+                    err_detail = f" - {response.text[:200]}"
+                ctx.warning(f"Serper API HTTP {response.status_code}{err_detail}")
+                return EvidenceItem(
+                    evidence_id=evidence_id,
+                    requirement_id=requirement_id,
+                    provenance=Provenance(
+                        source_id=target.source_id,
+                        source_uri=target.uri,
+                        tier=0,
+                    ),
+                    success=False,
+                    error=f"Serper API error: HTTP {response.status_code}{err_detail}",
+                    status_code=response.status_code,
+                )
+
+            data = response.json()
+            extracted_fields = self._extract_serper_fields(data)
+
+            # Build human-readable content
+            content_parts = []
+            items = data.get("organic") or []
+            for i, item in enumerate(items[:10], 1):
+                title = item.get("title", "")
+                snippet = item.get("snippet", "")
+                link = item.get("link", "")
+                content_parts.append(f"[{i}] {title}\n{snippet}\n{link}")
+
+            raw_content = "\n\n".join(content_parts) if content_parts else json.dumps(data)[:10000]
+            parsed_value = data
+
+            provenance = Provenance(
+                source_id=target.source_id,
+                source_uri=target.uri,
+                tier=self._determine_tier(target.source_id, _SERPER_URL),
+                fetched_at=ctx.now(),
+                receipt_id=response.receipt_id,
+                content_hash=self._hash_content(response.content),
+            )
+
+            extracted_fields = _truncate_extracted_fields(extracted_fields)
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement_id,
+                provenance=provenance,
+                raw_content=raw_content[:10000] if len(raw_content) > 10000 else raw_content,
+                content_type="application/json",
+                parsed_value=parsed_value,
+                success=True,
+                error=None,
+                status_code=response.status_code,
+                extracted_fields=extracted_fields,
+            )
+
+        except json.JSONDecodeError as e:
+            ctx.warning(f"Serper invalid JSON for {target.search_query}: {e}")
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement_id,
+                provenance=Provenance(source_id=target.source_id, source_uri=target.uri, tier=0),
+                success=False,
+                error=f"Invalid Serper response: {e}",
+            )
+        except Exception as e:
+            ctx.warning(f"Serper fetch failed for {target.search_query}: {e}")
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement_id,
+                provenance=Provenance(source_id=target.source_id, source_uri=target.uri, tier=0),
+                success=False,
+                error=str(e),
+            )
+
+    def _extract_serper_fields(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Extract search result fields from Serper response (organic results)."""
+        fields: dict[str, Any] = {}
+        items = data.get("organic") or []
+
+        if not items:
+            fields["search_results"] = []
+            return fields
+
+        results = []
+        for item in items:
+            title = item.get("title", "")
+            snippet = item.get("snippet", "")
+            link = item.get("link", "")
+            date_val = item.get("date")
+            results.append({
+                "headline": title,
+                "content": snippet,
+                "link": link,
+                "date": date_val,
+            })
+
+        fields["search_results"] = results
+        first = results[0]
+        fields["headline"] = first.get("headline", "")
+        fields["content"] = first.get("content", "")
+        if first.get("date"):
+            fields["date"] = first["date"]
+
+        return fields
+
+    def _fetch_direct(
+        self,
+        ctx: "AgentContext",
+        target: SourceTarget,
+        requirement_id: str,
+        evidence_id: str,
+    ) -> EvidenceItem:
+        """Direct HTTP fetch (non-search)."""
+        effective_uri = target.uri
+
+        if not ctx.http:
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement_id,
+                provenance=Provenance(
+                    source_id=target.source_id,
+                    source_uri=target.uri,
+                    tier=0,
+                ),
+                success=False,
+                error="HTTP client not available",
+            )
+
+        try:
             method = target.method if target.method in ("GET", "POST") else "GET"
-            
+
             if method == "GET":
                 response = ctx.http.get(
                     effective_uri,
@@ -169,17 +362,15 @@ class HttpAdapter(SourceAdapter):
                     json=target.body if isinstance(target.body, dict) else None,
                     data=target.body if isinstance(target.body, str) else None,
                 )
-            
-            # Parse response based on content type
+
             raw_content = response.text
             parsed_value = None
             extracted_fields = {}
             content_type = response.headers.get("content-type", "")
-            
+
             if target.expected_content_type == "json" or "json" in content_type:
                 try:
                     parsed_value = response.json()
-                    # Extract nested values for common patterns
                     extracted_fields = self._extract_json_fields(parsed_value)
                 except json.JSONDecodeError:
                     pass
@@ -188,8 +379,7 @@ class HttpAdapter(SourceAdapter):
                 extracted_fields = self._extract_html_fields(raw_content)
             else:
                 parsed_value = raw_content
-            
-            # Build provenance (source_uri remains the spec uri for commitments)
+
             provenance = Provenance(
                 source_id=target.source_id,
                 source_uri=target.uri,
@@ -198,7 +388,7 @@ class HttpAdapter(SourceAdapter):
                 receipt_id=response.receipt_id,
                 content_hash=self._hash_content(response.content),
             )
-            
+
             extracted_fields = _truncate_extracted_fields(extracted_fields)
             return EvidenceItem(
                 evidence_id=evidence_id,
@@ -212,7 +402,7 @@ class HttpAdapter(SourceAdapter):
                 status_code=response.status_code,
                 extracted_fields=extracted_fields,
             )
-            
+
         except Exception as e:
             ctx.warning(f"HTTP fetch failed for {target.uri}: {e}")
             return EvidenceItem(

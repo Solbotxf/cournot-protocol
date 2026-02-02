@@ -19,6 +19,12 @@ ENV_PREFIX = "COURNOT_"
 
 
 @dataclass
+class SerperConfig:
+    """Configuration for Serper API (search operations via google.serper.dev)."""
+    api_key: str = ""
+
+
+@dataclass
 class CollectorConfig:
     """Configuration for the Collector agent."""
     default_timeout_s: int = 20
@@ -64,6 +70,9 @@ class CLIConfig:
     
     # Collector settings
     collector: CollectorConfig = field(default_factory=CollectorConfig)
+
+    # Serper API (for search operations in Collector)
+    serper: SerperConfig = field(default_factory=SerperConfig)
     
     # LLM settings
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -167,6 +176,12 @@ def load_config_from_file(path: Path) -> CLIConfig:
         include_timestamps=collector_data.get("include_timestamps", False),
         collector_id=collector_data.get("collector_id", "collector_v1"),
     )
+
+    # Serper API (supports legacy google_cse key for api_key)
+    serper_data = data.get("serper", {}) or data.get("google_cse", {})
+    config.serper = SerperConfig(
+        api_key=serper_data.get("api_key", ""),
+    )
     
     # LLM settings
     llm_data = data.get("llm", {})
@@ -257,6 +272,9 @@ def get_default_config_template() -> str:
     "strict_tier_policy": true,
     "include_timestamps": false,
     "collector_id": "collector_v1"
+  },
+  "serper": {
+    "api_key": ""
   },
   "llm": {
     "provider": "",
