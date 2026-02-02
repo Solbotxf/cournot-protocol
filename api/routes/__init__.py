@@ -1,5 +1,5 @@
 """API route handlers."""
 
-from api.routes import health, run, verify, replay
+from api.routes import health, run, verify, replay, steps
 
-__all__ = ["health", "run", "verify", "replay"]
+__all__ = ["health", "run", "verify", "replay", "steps"]

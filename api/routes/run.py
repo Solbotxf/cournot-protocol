@@ -7,6 +7,7 @@ Execute the pipeline and return results.
 from __future__ import annotations
 
 import io
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -17,25 +18,28 @@ from fastapi.responses import StreamingResponse
 from api.models.requests import RunRequest
 from api.models.responses import RunResponse, RunSummary, VerificationInfo
 from api.deps import get_pipeline
-from api.errors import InternalError
+from api.errors import InternalError, PipelineError
 
 from orchestrator.pipeline import PoRPackage, RunResult
-from orchestrator.artifacts.io import save_pack_zip
+from orchestrator.artifacts.io import save_pack
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["pipeline"])
 
 
-def build_summary(result: RunResult) -> RunSummary:
+def build_summary(result: RunResult, execution_mode: str) -> RunSummary:
     """Build RunSummary from pipeline result."""
     return RunSummary(
-        market_id=result.market_id or "",
-        outcome=result.outcome or "",
+        market_id=result.prompt_spec.market.market_id if result.prompt_spec else "",
+        outcome=result.verdict.outcome if result.verdict else "",
         confidence=result.verdict.confidence if result.verdict else 0.0,
         por_root=result.por_bundle.por_root if result.por_bundle else "",
         prompt_spec_hash=result.roots.prompt_spec_hash if result.roots else None,
         evidence_root=result.roots.evidence_root if result.roots else None,
         reasoning_root=result.roots.reasoning_root if result.roots else None,
+        execution_mode=execution_mode,
     )
 
 
@@ -65,20 +69,35 @@ def build_verification(result: RunResult, include_checks: bool) -> VerificationI
         return None
     
     checks = []
-    if include_checks and result.checks:
-        checks = [
-            {"check_id": c.check_id, "ok": c.ok, "message": c.message}
-            for c in result.checks
-        ]
+    total_checks = 0
+    passed_checks = 0
+    failed_checks = 0
+    
+    if result.checks:
+        total_checks = len(result.checks)
+        passed_checks = sum(1 for c in result.checks if c.ok)
+        failed_checks = total_checks - passed_checks
+        
+        if include_checks:
+            checks = [
+                {"check_id": c.check_id, "ok": c.ok, "message": c.message}
+                for c in result.checks
+            ]
     
     challenges = []
     if result.challenges:
         challenges = result.challenges
     
+    errors = list(result.errors) if result.errors else []
+    
     return VerificationInfo(
         sentinel_ok=result.sentinel_verification.ok,
+        total_checks=total_checks,
+        passed_checks=passed_checks,
+        failed_checks=failed_checks,
         checks=checks,
         challenges=challenges,
+        errors=errors,
     )
 
 
@@ -108,13 +127,23 @@ async def run_pipeline(request: RunRequest):
     """
     try:
         # Create and run pipeline
+        logger.info(f"Running pipeline for query: {request.user_input[:50]}...")
+        
         pipeline = get_pipeline(
             strict_mode=request.strict_mode,
             enable_sentinel=request.enable_sentinel_verify,
             enable_replay=request.enable_replay,
+            mode=request.execution_mode,
         )
         
         result = pipeline.run(request.user_input)
+        
+        # Check for pipeline errors
+        if not result.ok and result.errors:
+            raise PipelineError(
+                f"Pipeline failed: {result.errors[0]}",
+                details={"errors": list(result.errors)},
+            )
         
         # Handle pack_zip format
         if request.return_format == "pack_zip":
@@ -127,18 +156,23 @@ async def run_pipeline(request: RunRequest):
                 tmp_path = Path(tmp.name)
             
             try:
-                save_pack_zip(package, tmp_path)
+                save_pack(package, tmp_path)
                 zip_bytes = tmp_path.read_bytes()
             finally:
                 tmp_path.unlink(missing_ok=True)
             
+            # Get market_id
+            market_id = ""
+            if result.prompt_spec:
+                market_id = result.prompt_spec.market.market_id
+            
             # Build headers
             headers = {
-                "X-Market-Id": result.market_id or "",
+                "X-Market-Id": market_id,
                 "X-Por-Root": result.por_bundle.por_root if result.por_bundle else "",
-                "X-Outcome": result.outcome or "",
+                "X-Outcome": result.verdict.outcome if result.verdict else "",
                 "X-Confidence": str(result.verdict.confidence if result.verdict else 0.0),
-                "Content-Disposition": f"attachment; filename=pack_{result.market_id or 'unknown'}.zip",
+                "Content-Disposition": f"attachment; filename=pack_{market_id or 'unknown'}.zip",
             }
             
             return StreamingResponse(
@@ -148,8 +182,12 @@ async def run_pipeline(request: RunRequest):
             )
         
         # Handle JSON format
-        summary = build_summary(result)
-        artifacts = build_artifacts(result)
+        summary = build_summary(result, request.execution_mode)
+        
+        artifacts = None
+        if request.include_artifacts:
+            artifacts = build_artifacts(result)
+        
         verification = build_verification(result, request.include_checks)
         
         return RunResponse(
@@ -160,5 +198,10 @@ async def run_pipeline(request: RunRequest):
             errors=list(result.errors) if result.errors else [],
         )
     
+    except PipelineError:
+        raise
+    except InternalError:
+        raise
     except Exception as e:
+        logger.exception("Pipeline execution failed")
         raise InternalError(f"Pipeline execution failed: {str(e)}")

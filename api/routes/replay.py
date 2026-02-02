@@ -6,6 +6,7 @@ Replay evidence collection and verify against original pack.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -13,12 +14,16 @@ from typing import Any
 from fastapi import APIRouter, File, UploadFile, Form
 
 from api.models.responses import ReplayResponse, DivergenceInfo
+from api.deps import get_verification_context
 from api.errors import MissingFileError, InvalidPackError, InternalError
 
 from orchestrator.artifacts.io import load_pack, PackIOError
 from orchestrator.pipeline import PoRPackage
-from core.por.proof_of_reasoning import verify_por_bundle, compute_evidence_root
+from core.por.proof_of_reasoning import compute_evidence_root
+from agents.sentinel import verify_artifacts
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["replay"])
 
@@ -28,15 +33,17 @@ def replay_evidence(package: PoRPackage, timeout_s: int) -> tuple[bool, str, lis
     Replay evidence collection and compare with original.
     
     In production, this would:
-    1. Re-fetch evidence from original sources
+    1. Re-fetch evidence from original sources using retrieval receipts
     2. Compare with evidence in the package
     3. Report divergences
     
-    For now, we verify the evidence root matches.
+    For now, we verify the evidence structure and hashes match.
     
     Returns:
         Tuple of (matches, replayed_root, divergences)
     """
+    logger.info(f"Replaying evidence (timeout={timeout_s}s)...")
+    
     # Compute evidence root from package
     computed_root = compute_evidence_root(package.evidence)
     bundle_root = package.bundle.evidence_root
@@ -52,42 +59,85 @@ def replay_evidence(package: PoRPackage, timeout_s: int) -> tuple[bool, str, lis
             "reason": "Evidence root does not match bundle commitment",
         })
     
-    # Check individual evidence items
+    # Check individual evidence items for completeness
     for item in package.evidence.items:
-        if item.content is None:
+        # Check for missing content
+        if item.raw_content is None and item.success:
             divergences.append({
                 "type": "missing_content",
                 "evidence_id": item.evidence_id,
-                "reason": "Evidence item has no content",
+                "reason": "Evidence item marked successful but has no content",
+            })
+        
+        # Check for missing provenance
+        if item.provenance is None:
+            divergences.append({
+                "type": "missing_provenance",
+                "evidence_id": item.evidence_id,
+                "reason": "Evidence item has no provenance record",
+            })
+        elif item.provenance.content_hash is None and item.success:
+            divergences.append({
+                "type": "missing_hash",
+                "evidence_id": item.evidence_id,
+                "reason": "Evidence item has no content hash",
             })
     
-    return matches, computed_root, divergences
+    logger.info(f"Replay complete: {len(divergences)} divergences found")
+    
+    return len(divergences) == 0, computed_root, divergences
 
 
-def run_sentinel_verification(package: PoRPackage) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Run sentinel verification in replay mode."""
-    result = verify_por_bundle(
-        package.bundle,
+def run_sentinel_verification(
+    package: PoRPackage,
+) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """
+    Run sentinel verification in replay mode.
+    
+    Returns:
+        Tuple of (ok, checks, challenges, errors)
+    """
+    ctx = get_verification_context()
+    
+    result = verify_artifacts(
+        ctx,
         prompt_spec=package.prompt_spec,
-        evidence=package.evidence,
-        trace=package.trace,
+        tool_plan=package.tool_plan,
+        evidence_bundle=package.evidence,
+        reasoning_trace=package.trace,
+        verdict=package.verdict,
+        execution_log=None,
+        strict=True,
     )
     
-    checks = [
-        {"check_id": c.check_id, "ok": c.ok, "message": c.message}
-        for c in result.checks
-    ]
+    if not result.success:
+        return False, [], [], [result.error or "Verification failed"]
     
+    verification_result, report = result.output
+    
+    # Build checks from report
+    checks = []
+    for cat_name in ["completeness_checks", "hash_checks", "consistency_checks", 
+                     "provenance_checks", "reasoning_checks"]:
+        cat_checks = getattr(report, cat_name, [])
+        for check in cat_checks:
+            checks.append({
+                "check_id": check.get("check_id", "unknown"),
+                "ok": check.get("passed", False),
+                "message": check.get("message", ""),
+                "source": "sentinel",
+            })
+    
+    # Build challenges from errors
     challenges = []
-    if not result.ok and result.challenge:
-        challenges.append({
-            "kind": result.challenge.kind,
-            "reason": result.challenge.reason,
-            "evidence_id": result.challenge.evidence_id,
-            "step_id": result.challenge.step_id,
-        })
+    if not report.verified and report.errors:
+        for error in report.errors:
+            challenges.append({
+                "kind": "verification_error",
+                "reason": error,
+            })
     
-    return result.ok, checks, challenges
+    return report.verified, checks, challenges, report.errors or []
 
 
 @router.post("/replay", response_model=ReplayResponse)
@@ -116,6 +166,7 @@ async def replay_pack(
     
     try:
         # Load pack with hash verification
+        logger.info(f"Loading pack: {file.filename}")
         try:
             package = load_pack(tmp_path, verify_hashes=True)
         except PackIOError as e:
@@ -125,7 +176,8 @@ async def replay_pack(
         replay_ok, replayed_root, divergences = replay_evidence(package, timeout_s)
         
         # Sentinel verification
-        sentinel_ok, sentinel_checks, challenges = run_sentinel_verification(package)
+        logger.info("Running sentinel verification...")
+        sentinel_ok, sentinel_checks, challenges, errors = run_sentinel_verification(package)
         
         # Build divergence info if there are divergences
         divergence_info = None
@@ -153,11 +205,13 @@ async def replay_pack(
             divergence=divergence_info,
             checks=all_checks,
             challenges=challenges,
+            errors=errors,
         )
     
     except InvalidPackError:
         raise
     except Exception as e:
+        logger.exception("Replay failed")
         raise InternalError(f"Replay failed: {str(e)}")
     
     finally:

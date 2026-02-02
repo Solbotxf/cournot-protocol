@@ -6,6 +6,9 @@ HTTP API for the Cournot protocol:
 - POST /verify - Verify uploaded pack
 - POST /replay - Replay evidence and verify
 - GET /health - Health check
+
+Usage:
+    uvicorn api.app:app --reload
 """
 
 __version__ = "0.1.0"

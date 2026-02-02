@@ -38,6 +38,14 @@ class RunRequest(BaseModel):
         default=False,
         description="Include detailed verification checks in response",
     )
+    include_artifacts: bool = Field(
+        default=True,
+        description="Include full artifacts in JSON response",
+    )
+    execution_mode: Literal["production", "development", "test"] = Field(
+        default="development",
+        description="Execution mode for agent selection",
+    )
 
 
 class VerifyRequest(BaseModel):

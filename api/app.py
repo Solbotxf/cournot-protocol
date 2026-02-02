@@ -5,13 +5,25 @@ Main application setup and configuration.
 
 Usage:
     uvicorn api.app:app --reload
+    
+    # Or run directly
+    python -m api.app
 """
+
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import health, run, verify, replay
+from api.routes import health, run, verify, replay, steps
 from api.errors import APIError, api_error_handler, generic_error_handler
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 
 def create_app() -> FastAPI:
@@ -19,7 +31,28 @@ def create_app() -> FastAPI:
     
     app = FastAPI(
         title="Cournot Protocol API",
-        description="HTTP API for the Cournot prediction market resolution protocol",
+        description="""
+HTTP API for the Cournot prediction market resolution protocol.
+
+## Endpoints
+
+- **POST /run** - Execute the full pipeline on a query
+- **POST /verify** - Verify an uploaded artifact pack
+- **POST /replay** - Replay evidence and verify against original
+- **GET /health** - Health check
+
+## Response Formats
+
+The `/run` endpoint supports two response formats:
+- `json` - Structured JSON with artifacts and verification results
+- `pack_zip` - ZIP file containing the artifact pack
+
+## Execution Modes
+
+- `production` - Fail-closed, requires all capabilities
+- `development` - Uses fallback agents when needed (default)
+- `test` - Deterministic mock agents only
+        """,
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
@@ -43,6 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(run.router)
     app.include_router(verify.router)
     app.include_router(replay.router)
+    app.include_router(steps.router)
     
     return app
 

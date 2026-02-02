@@ -7,6 +7,8 @@ from api.models.responses import (
     RunResponse,
     VerifyResponse,
     ReplayResponse,
+    VerificationInfo,
+    DivergenceInfo,
     ErrorDetail,
     ErrorResponse,
 )
@@ -20,6 +22,8 @@ __all__ = [
     "RunResponse",
     "VerifyResponse",
     "ReplayResponse",
+    "VerificationInfo",
+    "DivergenceInfo",
     "ErrorDetail",
     "ErrorResponse",
 ]

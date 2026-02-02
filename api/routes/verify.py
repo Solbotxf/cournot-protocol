@@ -6,6 +6,7 @@ Verify an uploaded artifact pack.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -13,13 +14,16 @@ from typing import Any
 from fastapi import APIRouter, File, UploadFile, Form
 
 from api.models.responses import VerifyResponse
+from api.deps import get_verification_context
 from api.errors import MissingFileError, InvalidPackError, InternalError
 
 from orchestrator.artifacts.io import load_pack, validate_pack_files, PackIOError
 from orchestrator.artifacts.pack import validate_pack
 from orchestrator.pipeline import PoRPackage
-from core.por.proof_of_reasoning import verify_por_bundle
+from agents.sentinel import verify_artifacts, build_proof_bundle
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["verification"])
 
@@ -44,30 +48,57 @@ def run_semantic_verification(package: PoRPackage) -> tuple[bool, list[dict[str,
     return result.ok, checks
 
 
-def run_sentinel_verification(package: PoRPackage) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Run sentinel verification."""
-    result = verify_por_bundle(
-        package.bundle,
+def run_sentinel_verification(
+    package: PoRPackage,
+) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """
+    Run sentinel verification on the package.
+    
+    Returns:
+        Tuple of (ok, checks, challenges, errors)
+    """
+    ctx = get_verification_context()
+    
+    # Use verify_artifacts which takes individual artifacts
+    result = verify_artifacts(
+        ctx,
         prompt_spec=package.prompt_spec,
-        evidence=package.evidence,
-        trace=package.trace,
+        tool_plan=package.tool_plan,
+        evidence_bundle=package.evidence,
+        reasoning_trace=package.trace,
+        verdict=package.verdict,
+        execution_log=None,
+        strict=True,
     )
     
-    checks = [
-        {"check_id": c.check_id, "ok": c.ok, "message": c.message, "source": "sentinel"}
-        for c in result.checks
-    ]
+    if not result.success:
+        return False, [], [], [result.error or "Verification failed"]
     
+    verification_result, report = result.output
+    
+    # Build checks from report
+    checks = []
+    for cat_name in ["completeness_checks", "hash_checks", "consistency_checks", 
+                     "provenance_checks", "reasoning_checks"]:
+        cat_checks = getattr(report, cat_name, [])
+        for check in cat_checks:
+            checks.append({
+                "check_id": check.get("check_id", "unknown"),
+                "ok": check.get("passed", False),
+                "message": check.get("message", ""),
+                "source": "sentinel",
+            })
+    
+    # Build challenges from errors
     challenges = []
-    if not result.ok and result.challenge:
-        challenges.append({
-            "kind": result.challenge.kind,
-            "reason": result.challenge.reason,
-            "evidence_id": result.challenge.evidence_id,
-            "step_id": result.challenge.step_id,
-        })
+    if not report.verified and report.errors:
+        for error in report.errors:
+            challenges.append({
+                "kind": "verification_error",
+                "reason": error,
+            })
     
-    return result.ok, checks, challenges
+    return report.verified, checks, challenges, report.errors or []
 
 
 @router.post("/verify", response_model=VerifyResponse)
@@ -98,6 +129,7 @@ async def verify_pack(
     
     try:
         # Step 1: Hash verification
+        logger.info(f"Verifying file hashes for: {file.filename}")
         hashes_ok, hash_checks = run_hash_verification(tmp_path)
         
         # Step 2: Load pack
@@ -107,15 +139,18 @@ async def verify_pack(
             raise InvalidPackError(f"Failed to load pack: {str(e)}")
         
         # Step 3: Semantic verification
+        logger.info("Running semantic verification...")
         semantic_ok, semantic_checks = run_semantic_verification(package)
         
         # Step 4: Sentinel verification (optional)
         sentinel_ok = None
         sentinel_checks = []
         challenges = []
+        errors = []
         
         if enable_sentinel:
-            sentinel_ok, sentinel_checks, challenges = run_sentinel_verification(package)
+            logger.info("Running sentinel verification...")
+            sentinel_ok, sentinel_checks, challenges, errors = run_sentinel_verification(package)
         
         # Combine all checks
         all_checks = []
@@ -137,11 +172,13 @@ async def verify_pack(
             outcome=package.verdict.outcome if package.verdict else "",
             checks=all_checks,
             challenges=challenges,
+            errors=errors,
         )
     
     except InvalidPackError:
         raise
     except Exception as e:
+        logger.exception("Verification failed")
         raise InternalError(f"Verification failed: {str(e)}")
     
     finally:
