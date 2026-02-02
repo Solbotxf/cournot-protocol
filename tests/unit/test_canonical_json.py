@@ -19,9 +19,6 @@ from enum import Enum
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-import sys
-sys.path.insert(0, "/mnt/user-data/outputs")
-
 from core.schemas import (
     CanonicalizationException,
     DataRequirement,
@@ -31,13 +28,11 @@ from core.schemas import (
     MarketSpec,
     PredictionSemantics,
     PromptSpec,
-    ProvenanceProof,
+    Provenance,
     ResolutionRule,
     ResolutionRules,
     ResolutionWindow,
-    RetrievalReceipt,
     SelectionPolicy,
-    SourceDescriptor,
     SourcePolicy,
     SourceTarget,
     DisputePolicy,
@@ -173,24 +168,14 @@ def sample_evidence_item() -> EvidenceItem:
     """A sample EvidenceItem for testing."""
     return EvidenceItem(
         evidence_id="evidence-001",
-        source=SourceDescriptor(
+        requirement_id="req_001",
+        provenance=Provenance(
             source_id="test-source",
-            uri="https://api.example.com/data",
-            provider="Example Provider",
-        ),
-        retrieval=RetrievalReceipt(
-            retrieved_at=datetime(2026, 1, 27, 20, 0, 0, tzinfo=timezone.utc),
-            method="api_call",
-            tool="collector-agent",
-        ),
-        provenance=ProvenanceProof(
+            source_uri="https://api.example.com/data",
             tier=1,
-            kind="signature",
-            proof_blob="base64encodedproof",
         ),
-        content_type="json",
-        content={"key": "value"},
-        confidence=0.95,
+        content_type="application/json",
+        parsed_value={"key": "value"},
     )
 
 
@@ -448,7 +433,7 @@ class TestRoundTripStability:
         serialized = dumps_canonical(sample_evidence_item)
         deserialized = loads_canonical(serialized)
         assert deserialized["evidence_id"] == "evidence-001"
-        assert deserialized["source"]["source_id"] == "test-source"
+        assert deserialized["provenance"]["source_id"] == "test-source"
 
 
 # =============================================================================
@@ -797,10 +782,10 @@ class TestComplexSchemaIntegration:
         """EvidenceBundle should serialize correctly."""
         bundle = EvidenceBundle(
             bundle_id="bundle-001",
-            collector_id="collector-agent-1",
-            collection_time=datetime(2026, 1, 27, 21, 0, 0, tzinfo=timezone.utc),
+            market_id="mk_test",
+            plan_id="plan_test",
             items=[sample_evidence_item],
-            provenance_summary={"tier_1_count": 1},
+            collected_at=datetime(2026, 1, 27, 21, 0, 0, tzinfo=timezone.utc),
         )
         result = dumps_canonical(bundle)
         parsed = json.loads(result)
