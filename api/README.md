@@ -145,6 +145,39 @@ Replay evidence collection and verify against original pack.
 }
 ```
 
+### Step: Prompt Engineer
+
+```bash
+POST /step/prompt
+```
+
+Run only the prompt engineer step. Compiles a natural language query into a structured `PromptSpec` and `ToolPlan`.
+
+**Request Body:**
+```json
+{
+  "user_input": "Will BTC be above $100k by end of 2025?",
+  "strict_mode": true
+}
+```
+
+### Step: Resolve
+
+```bash
+POST /step/resolve
+```
+
+Run the resolution pipeline (collect → audit → judge → PoR bundle) using a pre-built `prompt_spec` and `tool_plan` from the prompt step.
+
+**Request Body:**
+```json
+{
+  "prompt_spec": { "..." : "..." },
+  "tool_plan": { "..." : "..." },
+  "execution_mode": "development"
+}
+```
+
 ## Configuration
 
 ### Environment Variables
@@ -223,7 +256,7 @@ curl -X POST http://localhost:8000/verify \
   -F "enable_sentinel=true"
 ```
 
-### cURL - Step check (for example prompt engineering)
+### cURL - Step 1: Prompt Engineering
 
 ```bash
 curl -X POST http://localhost:8000/step/prompt \
@@ -232,6 +265,60 @@ curl -X POST http://localhost:8000/step/prompt \
     "user_input": "Will BTC be above $100k by end of 2025?",
     "strict_mode": true
   }'
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "market_id": "mk_6d3dc65b5bdabbe0",
+  "prompt_spec": { "schema_version": "v1", "task_type": "prediction_resolution", "..." : "..." },
+  "tool_plan": { "plan_id": "plan_mk_6d3dc65b5bdabbe0", "requirements": ["req_001", "req_002"], "..." : "..." },
+  "metadata": { "compiler": "fallback", "question_type": "crypto_price", "num_requirements": 2 },
+  "error": null
+}
+```
+
+### cURL - Step 2: Resolve (collect → audit → judge → PoR bundle)
+
+Pass the `prompt_spec` and `tool_plan` from the prompt step output:
+
+```bash
+# Save prompt output
+PROMPT=$(curl -s -X POST http://localhost:8000/step/prompt \
+  -H "Content-Type: application/json" \
+  -d '{"user_input": "Will BTC be above $100k by end of 2025?", "strict_mode": true}')
+
+# Feed into resolve
+curl -X POST http://localhost:8000/step/resolve \
+  -H "Content-Type: application/json" \
+  -d "$(echo $PROMPT | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+print(json.dumps({
+    'prompt_spec': r['prompt_spec'],
+    'tool_plan': r['tool_plan'],
+    'execution_mode': 'development'
+}))
+")"
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "market_id": "mk_6d3dc65b5bdabbe0",
+  "outcome": "YES",
+  "confidence": 0.8,
+  "por_root": "0xf6ef1f33...",
+  "artifacts": {
+    "evidence_bundle": { "bundle_id": "bundle_...", "items": ["..."], "..." : "..." },
+    "reasoning_trace": { "trace_id": "trace_...", "steps": ["..."], "preliminary_outcome": "YES", "..." : "..." },
+    "verdict": { "outcome": "YES", "confidence": 0.8, "resolution_rule_id": "R_THRESHOLD", "..." : "..." },
+    "por_bundle": { "por_root": "0xf6ef1f33...", "..." : "..." }
+  },
+  "errors": []
+}
 ```
 
 ### Python - Run Pipeline
@@ -301,6 +388,7 @@ api/
     ├── __init__.py
     ├── health.py      # Health check
     ├── run.py         # Pipeline execution
+    ├── steps.py       # Individual step execution (prompt, resolve)
     ├── verify.py      # Pack verification
     └── replay.py      # Evidence replay
 ```
