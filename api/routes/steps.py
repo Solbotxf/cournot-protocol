@@ -97,12 +97,12 @@ async def run_prompt_engineer(request: PromptEngineerRequest) -> PromptEngineerR
     try:
         logger.info(f"Compiling prompt: {request.user_input[:50]}...")
         
-        ctx = get_agent_context()
+        ctx = get_agent_context(with_llm=True)
         
-        # Use the agent directly for strict_mode control
-        from agents.prompt_engineer import PromptEngineerFallback
-        
-        agent = PromptEngineerFallback(strict_mode=request.strict_mode)
+        # Use the LLM agent for prompt compilation
+        from agents.prompt_engineer import PromptEngineerLLM
+
+        agent = PromptEngineerLLM(strict_mode=request.strict_mode)
         result = agent.run(ctx, request.user_input)
         
         if not result.success:

@@ -98,6 +98,12 @@ class LLMReasoner:
         evidence_json = self._prepare_evidence_json(
             evidence_bundle, max_chars=max_chars, max_items=max_items, ctx=ctx
         )
+        # Format possible outcomes for prompt
+        if prompt_spec.is_multi_choice:
+            possible_outcomes_text = f"Multi-choice market. Allowed outcomes: {', '.join(prompt_spec.possible_outcomes)}"
+        else:
+            possible_outcomes_text = "Binary market. Allowed outcomes: YES, NO"
+
         user_prompt = USER_PROMPT_TEMPLATE.format(
             question=prompt_spec.market.question,
             event_definition=prompt_spec.market.event_definition,
@@ -107,12 +113,13 @@ class LLMReasoner:
             predicate=semantics.predicate,
             threshold=semantics.threshold or "N/A",
             timeframe=semantics.timeframe or "N/A",
+            possible_outcomes=possible_outcomes_text,
         )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        
+
         # Secondary truncation: if estimated tokens exceed target, reduce evidence and rebuild
         while self._estimate_tokens(messages) > target_tokens and max_chars > 2000:
             max_chars = max(2000, max_chars // 2)
@@ -128,6 +135,7 @@ class LLMReasoner:
                 predicate=semantics.predicate,
                 threshold=semantics.threshold or "N/A",
                 timeframe=semantics.timeframe or "N/A",
+                possible_outcomes=possible_outcomes_text,
             )
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -408,9 +416,10 @@ class LLMReasoner:
                 winning_evidence_id=conf_data.get("winning_evidence_id"),
             ))
         
-        # Map outcome
+        # Map outcome - validate against possible outcomes dynamically
         outcome = data.get("preliminary_outcome", "UNCERTAIN")
-        if outcome not in ("YES", "NO", "INVALID", "UNCERTAIN"):
+        valid_outcomes = set(prompt_spec.possible_outcomes) | {"INVALID", "UNCERTAIN"}
+        if outcome not in valid_outcomes:
             outcome = "UNCERTAIN"
         
         # Build trace

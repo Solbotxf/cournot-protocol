@@ -25,6 +25,7 @@ class NormalizedUserRequest:
     time_config: dict[str, Any] = field(default_factory=dict)
     event_definition: str = ""
     outcome_type: str = "binary"
+    possible_outcomes: list[str] = field(default_factory=lambda: ["YES", "NO"])
     threshold: Optional[str] = None
     source_preferences: list[str] = field(default_factory=list)
     source_targets: list[SourceTarget] = field(default_factory=list)

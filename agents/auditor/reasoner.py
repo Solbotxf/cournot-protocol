@@ -153,8 +153,38 @@ class RuleBasedReasoner:
         threshold = self._parse_threshold(semantics.threshold)
         outcome = "UNCERTAIN"
         rule_applied = None
-        
-        if threshold is not None and best_value is not None:
+
+        # Check for multi-choice market first
+        if prompt_spec.is_multi_choice and best_value is not None:
+            step_counter += 1
+            matched_outcome = self._match_multi_choice(best_value, prompt_spec.possible_outcomes)
+
+            trace.add_step(ReasoningStep(
+                step_id=f"step_{step_counter:03d}",
+                step_type="rule_application",
+                description="Match evidence against multi-choice outcomes",
+                evidence_refs=[EvidenceRef(
+                    evidence_id=best_evidence.evidence_id if best_evidence else "unknown",
+                    value_at_reference=best_value,
+                )] if best_evidence else [],
+                rule_id="R_MULTI_CHOICE",
+                input_summary=f"Value: {best_value}, Possible outcomes: {prompt_spec.possible_outcomes}",
+                output_summary=f"Matched outcome: {matched_outcome}",
+                conclusion=f"Evidence matches outcome '{matched_outcome}'" if matched_outcome else "No matching outcome found",
+                confidence_delta=0.15 if matched_outcome else -0.1,
+                depends_on=[f"step_{i:03d}" for i in range(1, step_counter)],
+            ))
+
+            if matched_outcome:
+                outcome = matched_outcome
+                rule_applied = "R_MULTI_CHOICE"
+                confidence += 0.15
+            else:
+                outcome = "INVALID"
+                rule_applied = "R_INVALID_FALLBACK"
+                confidence -= 0.1
+
+        elif threshold is not None and best_value is not None:
             # Threshold comparison
             step_counter += 1
             comparison_result = self._compare_threshold(best_value, threshold, prompt_spec)
@@ -480,6 +510,35 @@ class RuleBasedReasoner:
         # Default: above
         return val > threshold
     
+    def _match_multi_choice(self, value: Any, possible_outcomes: list[str]) -> str | None:
+        """
+        Match an evidence value against possible outcomes.
+
+        Uses case-insensitive string matching. Returns the first matching
+        outcome or None if no match is found.
+        """
+        if value is None:
+            return None
+
+        value_str = str(value).strip().lower()
+
+        # Exact match (case-insensitive)
+        for outcome in possible_outcomes:
+            if outcome.lower() == value_str:
+                return outcome
+
+        # Substring match: check if any outcome appears in the value
+        for outcome in possible_outcomes:
+            if outcome.lower() in value_str:
+                return outcome
+
+        # Reverse: check if the value appears in any outcome
+        for outcome in possible_outcomes:
+            if value_str in outcome.lower():
+                return outcome
+
+        return None
+
     def _is_truthy(self, value: Any) -> bool:
         """Check if a value is truthy for binary decisions."""
         if value is None:

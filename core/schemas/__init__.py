@@ -109,6 +109,7 @@ from .proof import (
 
 # Verdict schemas
 from .verdict import (
+    BinaryOutcome,
     DeterministicVerdict,
     Outcome,
     VerdictJustification,
@@ -199,6 +200,7 @@ __all__ = [
     "ProvenanceKind",
     "ContentType",
     # Verdict
+    "BinaryOutcome",
     "DeterministicVerdict",
     "Outcome",
     "VerdictJustification",

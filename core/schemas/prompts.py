@@ -334,6 +334,16 @@ class PromptSpec(BaseModel):
         """Convenience accessor for the market ID."""
         return self.market.market_id
 
+    @property
+    def is_multi_choice(self) -> bool:
+        """Check if this is a multi-choice market."""
+        return self.market.market_type == "multi_choice"
+
+    @property
+    def possible_outcomes(self) -> list[str]:
+        """Get the possible outcomes for this market."""
+        return self.market.possible_outcomes
+
     def get_all_source_targets(self) -> list[SourceTarget]:
         """Get all source targets from all data requirements."""
         targets = []

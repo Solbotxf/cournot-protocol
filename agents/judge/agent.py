@@ -24,7 +24,6 @@ from core.schemas import (
     CheckResult,
     DeterministicVerdict,
     EvidenceBundle,
-    Outcome,
     PromptSpec,
     ReasoningTrace,
     VerificationResult,
@@ -101,7 +100,7 @@ class JudgeLLM(BaseAgent):
             review = self._get_llm_review(ctx, prompt_spec, evidence_bundle, reasoning_trace)
             
             # Extract verdict parameters from review
-            outcome = self._extract_outcome(review, reasoning_trace)
+            outcome = self._extract_outcome(review, reasoning_trace, prompt_spec)
             confidence = self._extract_confidence(review, reasoning_trace)
             rule_id = self._extract_rule_id(review, reasoning_trace)
             
@@ -172,6 +171,12 @@ class JudgeLLM(BaseAgent):
             for r in prompt_spec.market.resolution_rules.get_sorted_rules()
         ])
         
+        # Format possible outcomes
+        if prompt_spec.is_multi_choice:
+            possible_outcomes_text = f"Multi-choice market. Allowed outcomes: {', '.join(prompt_spec.possible_outcomes)}"
+        else:
+            possible_outcomes_text = "Binary market. Allowed outcomes: YES, NO"
+
         # Build prompt
         user_prompt = USER_PROMPT_TEMPLATE.format(
             question=prompt_spec.market.question,
@@ -184,6 +189,7 @@ class JudgeLLM(BaseAgent):
             conflicts=conflicts_text,
             evidence_summary=trace.evidence_summary or f"{len(evidence_bundle.items)} evidence items.",
             resolution_rules=rules_text,
+            possible_outcomes=possible_outcomes_text,
         )
         
         messages = [
@@ -233,10 +239,10 @@ class JudgeLLM(BaseAgent):
         
         return json.loads(text.strip())
     
-    def _extract_outcome(self, review: dict[str, Any], trace: ReasoningTrace) -> Outcome:
+    def _extract_outcome(self, review: dict[str, Any], trace: ReasoningTrace, prompt_spec: PromptSpec) -> str:
         """Extract outcome from review."""
         outcome = review.get("outcome", trace.preliminary_outcome)
-        if outcome in ("YES", "NO", "INVALID"):
+        if outcome and prompt_spec.market.is_valid_outcome(outcome):
             return outcome
         return "INVALID"
     
@@ -286,7 +292,7 @@ class JudgeLLM(BaseAgent):
             ))
         
         # Check confidence appropriate for outcome
-        if verdict.outcome in ("YES", "NO") and verdict.confidence < 0.55:
+        if verdict.outcome != "INVALID" and verdict.confidence < 0.55:
             checks.append(CheckResult.warning(
                 check_id="confidence_threshold",
                 message=f"Low confidence {verdict.confidence:.0%} for {verdict.outcome} outcome",
@@ -398,63 +404,61 @@ class JudgeRuleBased(BaseAgent):
         prompt_spec: PromptSpec,
         evidence_bundle: EvidenceBundle,
         trace: ReasoningTrace,
-    ) -> tuple[Outcome, float, str]:
+    ) -> tuple[str, float, str]:
         """
         Apply deterministic rules to finalize verdict.
-        
+
         Returns:
             Tuple of (outcome, confidence, rule_id)
         """
+        market = prompt_spec.market
+
         # Start with preliminary values
         outcome = trace.preliminary_outcome or "UNCERTAIN"
         confidence = trace.preliminary_confidence or 0.5
         rule_id = trace.recommended_rule_id or "R_DEFAULT"
-        
+
         # Rule 1: Convert UNCERTAIN to INVALID
         if outcome == "UNCERTAIN":
             outcome = "INVALID"
             rule_id = "R_INVALID_FALLBACK"
-        
-        # Rule 2: Enforce minimum confidence for YES/NO
-        if outcome in ("YES", "NO"):
+
+        # Rule 2: Enforce minimum confidence for definitive outcomes
+        if outcome != "INVALID":
             if confidence < 0.55:
-                # Too low confidence - mark as INVALID
                 outcome = "INVALID"
                 rule_id = "R_INVALID_FALLBACK"
-                # Keep the confidence to show why it was invalid
-        
+
         # Rule 3: Check for unresolved conflicts
         unresolved_conflicts = [
             c for c in trace.conflicts
             if not c.winning_evidence_id
         ]
-        if unresolved_conflicts and outcome in ("YES", "NO"):
-            # Reduce confidence for unresolved conflicts
+        if unresolved_conflicts and outcome != "INVALID":
             confidence -= 0.1 * len(unresolved_conflicts)
             confidence = max(0.0, confidence)
-            
-            # If confidence drops too low, mark invalid
+
             if confidence < 0.55:
                 outcome = "INVALID"
                 rule_id = "R_CONFLICT"
-        
+
         # Rule 4: Check evidence coverage
         valid_evidence = evidence_bundle.get_valid_evidence()
-        if not valid_evidence and outcome in ("YES", "NO"):
+        if not valid_evidence and outcome != "INVALID":
             outcome = "INVALID"
             confidence = 0.3
             rule_id = "R_INVALID_FALLBACK"
-        
+
         # Rule 5: Boost confidence for high-tier evidence
-        if valid_evidence and outcome in ("YES", "NO"):
+        if valid_evidence and outcome != "INVALID":
             max_tier = max(e.provenance.tier for e in valid_evidence)
             if max_tier >= 3:
                 confidence = min(1.0, confidence + 0.05)
-        
-        # Ensure outcome is valid type
-        if outcome not in ("YES", "NO", "INVALID"):
+
+        # Ensure outcome is valid for this market
+        if not market.is_valid_outcome(outcome):
             outcome = "INVALID"
-        
+
         return outcome, confidence, rule_id
     
     def _validate_verdict(

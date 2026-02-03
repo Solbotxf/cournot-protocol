@@ -7,11 +7,24 @@ Provides factories for pipeline and agent context.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional
 
 from orchestrator.pipeline import Pipeline, PipelineConfig, ExecutionMode
 from agents import AgentContext
+
+logger = logging.getLogger(__name__)
+
+
+def _load_cli_config():
+    """Load CLIConfig from cournot.json (with env var overrides)."""
+    try:
+        from cournot_cli.config import load_config
+        return load_config()
+    except Exception as e:
+        logger.debug(f"Could not load cournot.json: {e}")
+        return None
 
 
 def get_agent_context(
@@ -21,30 +34,53 @@ def get_agent_context(
 ) -> AgentContext:
     """
     Create an AgentContext with optional capabilities.
-    
+
+    Resolution order for LLM config:
+      1. Environment variables (COURNOT_LLM_PROVIDER, COURNOT_LLM_API_KEY, COURNOT_LLM_MODEL)
+      2. cournot.json (searched in cwd, then ~/.config/cournot/)
+
     Args:
-        with_llm: Enable LLM client (requires COURNOT_LLM_* env vars)
+        with_llm: Enable LLM client
         with_http: Enable HTTP client for network requests
-    
+
     Returns:
         Configured AgentContext
     """
     # Start with minimal context
     ctx = AgentContext.create_minimal()
-    
+
     # Add LLM if requested and configured
     if with_llm:
+        # Try env vars first
         provider = os.getenv("COURNOT_LLM_PROVIDER")
         api_key = os.getenv("COURNOT_LLM_API_KEY")
         model = os.getenv("COURNOT_LLM_MODEL")
-        
-        if provider and api_key:
+        endpoint = None
+
+        # Fall back to cournot.json
+        if not provider or not api_key:
+            cli_config = _load_cli_config()
+            if cli_config and cli_config.llm.provider and cli_config.llm.api_key:
+                provider = provider or cli_config.llm.provider
+                api_key = api_key or cli_config.llm.api_key
+                model = model or cli_config.llm.model
+                endpoint = cli_config.llm.endpoint or None
+                logger.info(f"Loaded LLM config from cournot.json (provider={provider})")
+
+        if not provider or not api_key:
+            logger.warning(
+                "LLM requested but no provider/api_key found. "
+                "Set COURNOT_LLM_PROVIDER/COURNOT_LLM_API_KEY env vars "
+                "or configure llm.provider/llm.api_key in cournot.json."
+            )
+        else:
             try:
                 from core.llm import create_llm_client
                 llm = create_llm_client(
                     provider=provider,
                     api_key=api_key,
                     model=model,
+                    endpoint=endpoint,
                 )
                 ctx = AgentContext(
                     llm=llm,
@@ -54,9 +90,9 @@ def get_agent_context(
                     cache=ctx.cache,
                     logger=ctx.logger,
                 )
-            except Exception:
-                pass  # Fall back to no LLM
-    
+            except Exception as e:
+                logger.error(f"Failed to create LLM client: {e}")
+
     # Add HTTP client if requested
     if with_http:
         try:
@@ -72,7 +108,7 @@ def get_agent_context(
             )
         except Exception:
             pass  # Fall back to no HTTP
-    
+
     return ctx
 
 

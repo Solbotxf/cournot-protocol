@@ -14,8 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .versioning import SCHEMA_VERSION
 
 
-# The canonical outcome type for predictions
-Outcome = Literal["YES", "NO", "INVALID"]
+# The canonical outcome type for predictions.
+# For binary markets: "YES", "NO", or "INVALID".
+# For multi-choice markets: one of the enumerated outcomes or "INVALID".
+Outcome = str
+
+# Kept for type hints in binary-only contexts
+BinaryOutcome = Literal["YES", "NO", "INVALID"]
 
 
 class DeterministicVerdict(BaseModel):
@@ -41,7 +46,8 @@ class DeterministicVerdict(BaseModel):
     )
     outcome: Outcome = Field(
         ...,
-        description="The resolution outcome: YES, NO, or INVALID",
+        description="The resolution outcome. For binary: YES, NO, or INVALID. "
+        "For multi-choice: one of the enumerated outcomes or INVALID.",
     )
     confidence: float = Field(
         ...,
@@ -95,8 +101,8 @@ class DeterministicVerdict(BaseModel):
 
     @property
     def is_definitive(self) -> bool:
-        """Check if the verdict is definitive (YES or NO)."""
-        return self.outcome in ("YES", "NO")
+        """Check if the verdict is definitive (not INVALID)."""
+        return self.outcome != "INVALID"
 
     @property
     def is_invalid(self) -> bool:

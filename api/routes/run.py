@@ -134,6 +134,8 @@ async def run_pipeline(request: RunRequest):
             enable_sentinel=request.enable_sentinel_verify,
             enable_replay=request.enable_replay,
             mode=request.execution_mode,
+            with_llm=True,
+            with_http=True,
         )
         
         result = pipeline.run(request.user_input)

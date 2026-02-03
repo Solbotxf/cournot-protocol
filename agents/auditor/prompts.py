@@ -15,7 +15,7 @@ You MUST output valid JSON matching the exact schema specified. No explanations,
 1. **Analyze Each Evidence Item**: Examine every piece of evidence and extract relevant information
 2. **Apply Resolution Rules**: Use the provided rules to evaluate evidence
 3. **Handle Conflicts**: Identify and resolve any conflicting evidence
-4. **Draw Conclusions**: Build toward a preliminary outcome (YES/NO/INVALID/UNCERTAIN)
+4. **Draw Conclusions**: Build toward a preliminary outcome. For binary markets: YES/NO/INVALID/UNCERTAIN. For multi-choice markets: one of the enumerated possible outcomes, INVALID, or UNCERTAIN.
 5. **Assess Confidence**: Provide a confidence score based on evidence quality
 
 ## Output Schema
@@ -55,7 +55,7 @@ You MUST output valid JSON matching the exact schema specified. No explanations,
       "winning_evidence_id": "ev_001"
     }
   ],
-  "preliminary_outcome": "YES|NO|INVALID|UNCERTAIN",
+  "preliminary_outcome": "YES|NO|INVALID|UNCERTAIN (or one of the enumerated outcomes for multi-choice markets)",
   "preliminary_confidence": 0.85,
   "recommended_rule_id": "R_THRESHOLD"
 }
@@ -121,7 +121,11 @@ USER_PROMPT_TEMPLATE = """Analyze the following evidence and generate a reasonin
 - Threshold: {threshold}
 - Timeframe: {timeframe}
 
-Generate the complete JSON reasoning trace. Be thorough and show all reasoning steps."""
+## Possible Outcomes
+{possible_outcomes}
+
+Generate the complete JSON reasoning trace. Be thorough and show all reasoning steps.
+The preliminary_outcome MUST be one of the possible outcomes listed above, INVALID, or UNCERTAIN."""
 
 
 CONFLICT_RESOLUTION_PROMPT = """Two or more evidence items conflict. Resolve the conflict:

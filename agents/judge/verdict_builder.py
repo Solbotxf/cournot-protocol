@@ -18,7 +18,6 @@ from typing import Any, TYPE_CHECKING
 from core.schemas import (
     DeterministicVerdict,
     EvidenceBundle,
-    Outcome,
     PromptSpec,
     ReasoningTrace,
 )
@@ -60,7 +59,7 @@ class VerdictBuilder:
         evidence_bundle: EvidenceBundle,
         reasoning_trace: ReasoningTrace,
         *,
-        override_outcome: Outcome | None = None,
+        override_outcome: str | None = None,
         override_confidence: float | None = None,
         override_rule_id: str | None = None,
     ) -> DeterministicVerdict:
@@ -81,6 +80,7 @@ class VerdictBuilder:
         """
         # Determine outcome
         outcome = self._determine_outcome(
+            prompt_spec,
             reasoning_trace,
             override_outcome,
         )
@@ -145,55 +145,52 @@ class VerdictBuilder:
     
     def _determine_outcome(
         self,
+        prompt_spec: PromptSpec,
         trace: ReasoningTrace,
-        override: Outcome | None,
-    ) -> Outcome:
+        override: str | None,
+    ) -> str:
         """Determine the final outcome."""
         if override is not None:
             return override
-        
+
         preliminary = trace.preliminary_outcome
-        
-        if preliminary == "YES":
-            return "YES"
-        elif preliminary == "NO":
-            return "NO"
-        elif preliminary == "INVALID":
+
+        if preliminary and prompt_spec.market.is_valid_outcome(preliminary):
+            return preliminary
+        elif preliminary == "UNCERTAIN" or preliminary is None:
             return "INVALID"
-        else:  # UNCERTAIN
-            # Default to INVALID if uncertain
+        else:
+            # Unknown outcome, fall back to INVALID
             return "INVALID"
     
     def _determine_confidence(
         self,
         trace: ReasoningTrace,
-        outcome: Outcome,
+        outcome: str,
         override: float | None,
     ) -> float:
         """Determine the final confidence score."""
         if override is not None:
             return max(0.0, min(1.0, override))
-        
+
         base_confidence = trace.preliminary_confidence or 0.5
-        
+
         # Adjust based on outcome
         if outcome == "INVALID":
             # For INVALID, confidence represents certainty that resolution is impossible
             return max(0.0, min(1.0, base_confidence))
-        
-        # For YES/NO, ensure minimum threshold
+
+        # For definitive outcomes, ensure minimum threshold
         if base_confidence < self.MIN_CONFIDENCE_FOR_YES_NO:
-            # If confidence is too low for YES/NO, this should have been INVALID
-            # But if we're here, we trust the outcome and just clamp confidence
             base_confidence = self.MIN_CONFIDENCE_FOR_YES_NO
-        
+
         return max(0.0, min(1.0, base_confidence))
     
     def _determine_rule(
         self,
         prompt_spec: PromptSpec,
         trace: ReasoningTrace,
-        outcome: Outcome,
+        outcome: str,
         override: str | None,
     ) -> str:
         """Determine the resolution rule to cite."""
@@ -250,7 +247,7 @@ class VerdictBuilder:
         prompt_spec: PromptSpec,
         evidence_bundle: EvidenceBundle,
         trace: ReasoningTrace,
-        outcome: Outcome,
+        outcome: str,
         confidence: float,
         rule_id: str,
     ) -> str:
@@ -315,9 +312,9 @@ class VerdictValidator:
         if verdict.market_id != prompt_spec.market_id:
             errors.append(f"Market ID mismatch: {verdict.market_id} != {prompt_spec.market_id}")
         
-        # Check outcome is valid
-        if verdict.outcome not in ("YES", "NO", "INVALID"):
-            errors.append(f"Invalid outcome: {verdict.outcome}")
+        # Check outcome is valid for this market
+        if not prompt_spec.market.is_valid_outcome(verdict.outcome):
+            errors.append(f"Invalid outcome: {verdict.outcome}. Valid: {prompt_spec.market.get_valid_outcomes()}")
         
         # Check confidence bounds
         if not (0.0 <= verdict.confidence <= 1.0):

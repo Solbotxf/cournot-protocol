@@ -3,13 +3,7 @@ Prompt Engineer Agent
 
 Converts user free-text questions into structured PromptSpec and ToolPlan.
 
-Two implementations:
-- PromptEngineerLLM: Uses LLM for compilation (production)
-- PromptEngineerFallback: Pattern-based deterministic fallback
-
-Selection logic:
-- If ctx.llm is available → use LLM agent
-- Otherwise → use fallback agent
+Uses LLM for compilation. Requires an LLM client in the agent context.
 """
 
 from __future__ import annotations
@@ -21,7 +15,6 @@ from agents.registry import register_agent
 from core.schemas import PromptSpec, ToolPlan, VerificationResult, CheckResult
 
 from .llm_compiler import LLMPromptCompiler
-from .fallback_compiler import FallbackPromptCompiler
 
 if TYPE_CHECKING:
     from agents.context import AgentContext
@@ -177,163 +170,44 @@ class PromptEngineerLLM(BaseAgent):
         return VerificationResult(ok=ok, checks=checks)
 
 
-class PromptEngineerFallback(BaseAgent):
+def get_prompt_engineer(ctx: "AgentContext") -> BaseAgent:
     """
-    Pattern-based fallback Prompt Engineer.
-    
-    Uses regex patterns and heuristics for compilation.
-    Fully deterministic - same input always produces same output.
-    
-    Used when:
-    - LLM is unavailable
-    - Deterministic behavior is required
-    - Testing and development
-    """
-    
-    _name = "PromptEngineerFallback"
-    _version = "v1"
-    _capabilities = {AgentCapability.DETERMINISTIC, AgentCapability.REPLAY}
-    
-    def __init__(self, *, strict_mode: bool = True, **kwargs) -> None:
-        """
-        Initialize fallback prompt engineer.
-        
-        Args:
-            strict_mode: If True, exclude timestamps from hashing
-        """
-        super().__init__(**kwargs)
-        self.compiler = FallbackPromptCompiler(strict_mode=strict_mode)
-        self.strict_mode = strict_mode
-    
-    def run(
-        self,
-        ctx: "AgentContext",
-        user_input: str,
-    ) -> AgentResult:
-        """
-        Compile user input to PromptSpec and ToolPlan.
-        
-        Args:
-            ctx: Agent context
-            user_input: User's prediction question
-        
-        Returns:
-            AgentResult with (PromptSpec, ToolPlan) as output
-        """
-        ctx.info(f"PromptEngineerFallback compiling: {user_input[:50]}...")
-        
-        try:
-            # Compile using pattern matching
-            prompt_spec, tool_plan = self.compiler.compile(ctx, user_input)
-            
-            # Validate the output
-            verification = self._validate_output(prompt_spec, tool_plan)
-            
-            ctx.info(f"Successfully compiled to market_id={prompt_spec.market_id}")
-            
-            return AgentResult(
-                output=(prompt_spec, tool_plan),
-                verification=verification,
-                receipts=ctx.get_receipt_refs(),
-                metadata={
-                    "compiler": "fallback",
-                    "strict_mode": self.strict_mode,
-                    "market_id": prompt_spec.market_id,
-                    "question_type": prompt_spec.extra.get("question_type", "unknown"),
-                    "num_requirements": len(prompt_spec.data_requirements),
-                },
-            )
-        
-        except Exception as e:
-            ctx.error(f"Fallback compilation failed: {e}")
-            return AgentResult.failure(
-                error=str(e),
-            )
-    
-    def _validate_output(
-        self,
-        prompt_spec: PromptSpec,
-        tool_plan: ToolPlan,
-    ) -> VerificationResult:
-        """Validate the compiled output."""
-        checks: list[CheckResult] = []
-        
-        # Check 1: Has data requirements
-        if not prompt_spec.data_requirements:
-            checks.append(CheckResult.warning(
-                check_id="has_requirements",
-                message="No data requirements generated (fallback may need improvement)",
-            ))
-        else:
-            checks.append(CheckResult.passed(
-                check_id="has_requirements",
-                message=f"Has {len(prompt_spec.data_requirements)} data requirements",
-            ))
-        
-        # Check 2: Market ID is deterministic format
-        if not prompt_spec.market_id.startswith("mk_"):
-            checks.append(CheckResult.warning(
-                check_id="market_id_format",
-                message=f"Market ID does not follow mk_{{hash}} format: {prompt_spec.market_id}",
-            ))
-        else:
-            checks.append(CheckResult.passed(
-                check_id="market_id_format",
-                message="Market ID follows deterministic format",
-            ))
-        
-        # Check 3: Resolution rules exist
-        if not prompt_spec.market.resolution_rules.rules:
-            checks.append(CheckResult.failed(
-                check_id="has_rules",
-                message="Market must have resolution rules",
-            ))
-        else:
-            checks.append(CheckResult.passed(
-                check_id="has_rules",
-                message=f"Has {len(prompt_spec.market.resolution_rules.rules)} resolution rules",
-            ))
-        
-        # Determine overall status (warnings don't fail)
-        ok = all(c.ok for c in checks)
-        
-        return VerificationResult(ok=ok, checks=checks)
+    Get the prompt engineer agent.
 
+    Requires an LLM client in the agent context.
 
-def get_prompt_engineer(ctx: "AgentContext", *, prefer_llm: bool = True) -> BaseAgent:
-    """
-    Get the appropriate prompt engineer based on context.
-    
     Args:
-        ctx: Agent context
-        prefer_llm: If True and LLM is available, use LLM agent
-    
+        ctx: Agent context (must have ctx.llm set)
+
     Returns:
-        PromptEngineerLLM or PromptEngineerFallback
+        PromptEngineerLLM
+
+    Raises:
+        ValueError: If no LLM client is configured
     """
-    if prefer_llm and ctx.llm is not None:
-        return PromptEngineerLLM()
-    return PromptEngineerFallback()
+    if ctx.llm is None:
+        raise ValueError(
+            "LLM client is required for prompt compilation. "
+            "Configure an LLM provider in the agent context."
+        )
+    return PromptEngineerLLM()
 
 
 def compile_prompt(
     ctx: "AgentContext",
     user_input: str,
-    *,
-    prefer_llm: bool = True,
 ) -> AgentResult:
     """
     Convenience function to compile a prompt.
-    
+
     Args:
-        ctx: Agent context
+        ctx: Agent context (must have ctx.llm set)
         user_input: User's prediction question
-        prefer_llm: If True and LLM is available, use LLM agent
-    
+
     Returns:
         AgentResult with (PromptSpec, ToolPlan) as output
     """
-    agent = get_prompt_engineer(ctx, prefer_llm=prefer_llm)
+    agent = get_prompt_engineer(ctx)
     return agent.run(ctx, user_input)
 
 
@@ -345,16 +219,7 @@ def _register_agents() -> None:
         name="PromptEngineerLLM",
         factory=lambda ctx: PromptEngineerLLM(),
         capabilities={AgentCapability.LLM},
-        priority=100,  # Primary
-    )
-    
-    register_agent(
-        step=AgentStep.PROMPT_ENGINEER,
-        name="PromptEngineerFallback",
-        factory=lambda ctx: PromptEngineerFallback(),
-        capabilities={AgentCapability.DETERMINISTIC, AgentCapability.REPLAY},
-        priority=50,  # Fallback
-        is_fallback=True,
+        priority=100,
     )
 
 

@@ -15,14 +15,14 @@ You MUST output valid JSON matching the exact schema specified. No explanations,
 1. **Review Reasoning**: Verify the auditor's reasoning is sound
 2. **Validate Evidence**: Ensure evidence supports the conclusion
 3. **Apply Rules**: Confirm the correct resolution rule is applied
-4. **Finalize Outcome**: Determine the final YES/NO/INVALID outcome
+4. **Finalize Outcome**: Determine the final outcome. For binary markets: YES/NO/INVALID. For multi-choice markets: one of the enumerated outcomes or INVALID.
 5. **Assess Confidence**: Finalize the confidence score
 
 ## Output Schema
 
 ```json
 {
-  "outcome": "YES|NO|INVALID",
+  "outcome": "YES|NO|INVALID (or one of the enumerated outcomes for multi-choice markets)",
   "confidence": 0.85,
   "resolution_rule_id": "R_THRESHOLD",
   "reasoning_valid": true,
@@ -96,7 +96,10 @@ USER_PROMPT_TEMPLATE = """Review the following reasoning trace and finalize the 
 ## Resolution Rules Available
 {resolution_rules}
 
-Based on your review, finalize the verdict as JSON. If the reasoning is sound, confirm the preliminary outcome. If you find issues, explain them and adjust accordingly."""
+## Possible Outcomes
+{possible_outcomes}
+
+Based on your review, finalize the verdict as JSON. The outcome MUST be one of the possible outcomes listed above, or INVALID. If the reasoning is sound, confirm the preliminary outcome. If you find issues, explain them and adjust accordingly."""
 
 
 REVIEW_PROMPT = """The verdict needs additional review. Please reconsider:

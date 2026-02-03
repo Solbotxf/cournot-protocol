@@ -15,14 +15,31 @@ You MUST output valid JSON matching the exact schema specified. No explanations,
 
 1. **Event Definition**: Create an unambiguous, machine-evaluable definition of the event
 2. **Data Sources**: Identify explicit URLs/endpoints to fetch resolution data
-3. **Resolution Rules**: Define how evidence maps to YES/NO/INVALID outcomes
+3. **Resolution Rules**: Define how evidence maps to outcomes
 4. **Confidence Policy**: Specify how confidence scores are assigned
+
+## Market Types
+
+There are two market types:
+
+### Binary (default)
+- Two outcomes: YES or NO (plus INVALID if unresolvable)
+- Set `market_type: "binary"` and `possible_outcomes: ["YES", "NO"]`
+
+### Multi-Choice
+- More than 2 discrete outcomes (e.g., "1 day", "2 days", "5+ days")
+- Set `market_type: "multi_choice"` and list all outcomes in `possible_outcomes`
+- Do NOT include "INVALID" in possible_outcomes (it is always implicitly allowed)
+- Use when the question asks "which of these options" or provides explicit choices/options
+- The resolution rule should be `R_MULTI_CHOICE` instead of `R_BINARY_DECISION`
 
 ## Output Schema
 
 ```json
 {
   "market_id": "mk_{hash}",
+  "market_type": "binary|multi_choice",
+  "possible_outcomes": ["YES", "NO"],
   "question": "original user question",
   "event_definition": "machine-checkable predicate",
   "target_entity": "what is being predicted about",
@@ -103,7 +120,7 @@ For Polymarket questions:
 
 1. NEVER invent URLs - use only well-known, publicly accessible APIs
 2. ALWAYS include at least one data source with a valid URI
-3. Event definitions MUST be evaluable as boolean expressions
+3. For binary markets, event definitions MUST be evaluable as boolean expressions. For multi-choice, they should identify which outcome matches.
 4. For numeric thresholds, be explicit about comparison operators (>, >=, <, <=, ==)
 5. If the question is ambiguous, make reasonable assumptions and list them
 """

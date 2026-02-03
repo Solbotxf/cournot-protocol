@@ -10,6 +10,7 @@ Key features:
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -804,17 +805,55 @@ def create_test_pipeline(
     Returns:
         Test-configured Pipeline with mock context
     """
-    ctx = AgentContext.create_minimal()
-    
+    # PromptEngineerLLM requires an LLM client; provide a mock
+    mock_llm_response = json.dumps({
+        "market_id": "mk_test_pipeline",
+        "question": "Will BTC be above $100k?",
+        "event_definition": "price(BTC_USD) > 100000",
+        "target_entity": "bitcoin",
+        "predicate": "price above threshold",
+        "threshold": "100000",
+        "resolution_window": {
+            "start": "2025-01-01T00:00:00Z",
+            "end": "2025-12-31T23:59:59Z",
+        },
+        "resolution_deadline": "2025-12-31T23:59:59Z",
+        "data_requirements": [{
+            "requirement_id": "req_001",
+            "description": "Get BTC price",
+            "source_targets": [{
+                "source_id": "coingecko",
+                "uri": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+                "method": "GET",
+                "expected_content_type": "json",
+            }],
+            "selection_policy": {
+                "strategy": "single_best",
+                "min_sources": 1,
+                "max_sources": 1,
+                "quorum": 1,
+            },
+        }],
+        "resolution_rules": [
+            {"rule_id": "R_VALIDITY", "description": "Check validity", "priority": 100},
+            {"rule_id": "R_THRESHOLD", "description": "Compare to threshold", "priority": 80},
+            {"rule_id": "R_INVALID_FALLBACK", "description": "Fallback", "priority": 0},
+        ],
+        "allowed_sources": [
+            {"source_id": "coingecko", "kind": "api", "allow": True},
+        ],
+    })
+    ctx = AgentContext.create_mock(llm_responses=[mock_llm_response])
+
     # Configure step overrides to use deterministic agents
     overrides = StepOverrides(
-        prompt_engineer="PromptEngineerFallback",
+        prompt_engineer="PromptEngineerLLM",
         collector="CollectorMock",
         auditor="AuditorRuleBased",
         judge="JudgeRuleBased",
         sentinel="SentinelStrict",
     )
-    
+
     return create_pipeline(
         mode=ExecutionMode.TEST,
         context=ctx,

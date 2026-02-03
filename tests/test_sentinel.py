@@ -477,13 +477,51 @@ class TestIntegration:
     
     def test_full_pipeline_verification(self):
         """Test full pipeline from question to verified proof."""
+        import json
         from agents.prompt_engineer import compile_prompt
         from agents.collector import CollectorMock
         from agents.auditor import AuditorRuleBased
         from agents.judge import JudgeRuleBased
-        
-        ctx = AgentContext.create_minimal()
-        
+
+        mock_response = json.dumps({
+            "market_id": "mk_btc_test",
+            "question": "Will BTC be above $100k?",
+            "event_definition": "price(BTC_USD) > 100000",
+            "target_entity": "bitcoin",
+            "predicate": "price above threshold",
+            "threshold": "100000",
+            "resolution_window": {
+                "start": "2025-01-01T00:00:00Z",
+                "end": "2025-12-31T23:59:59Z",
+            },
+            "resolution_deadline": "2025-12-31T23:59:59Z",
+            "data_requirements": [{
+                "requirement_id": "req_001",
+                "description": "Get BTC price",
+                "source_targets": [{
+                    "source_id": "coingecko",
+                    "uri": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+                    "method": "GET",
+                    "expected_content_type": "json",
+                }],
+                "selection_policy": {
+                    "strategy": "single_best",
+                    "min_sources": 1,
+                    "max_sources": 1,
+                    "quorum": 1,
+                },
+            }],
+            "resolution_rules": [
+                {"rule_id": "R_VALIDITY", "description": "Check validity", "priority": 100},
+                {"rule_id": "R_THRESHOLD", "description": "Compare to threshold", "priority": 80},
+                {"rule_id": "R_INVALID_FALLBACK", "description": "Fallback", "priority": 0},
+            ],
+            "allowed_sources": [
+                {"source_id": "coingecko", "kind": "api", "allow": True},
+            ],
+        })
+        ctx = AgentContext.create_mock(llm_responses=[mock_response])
+
         # Step 1: Compile prompt
         prompt_result = compile_prompt(ctx, "Will BTC be above $100k?")
         assert prompt_result.success

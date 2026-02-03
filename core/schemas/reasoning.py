@@ -130,9 +130,11 @@ class ReasoningTrace(BaseModel):
     )
     
     # Preliminary conclusion (for Judge to finalize)
-    preliminary_outcome: Literal["YES", "NO", "INVALID", "UNCERTAIN"] | None = Field(
+    preliminary_outcome: str | None = Field(
         default=None,
-        description="Preliminary outcome before Judge review",
+        description="Preliminary outcome before Judge review. "
+        "For binary: YES/NO/INVALID/UNCERTAIN. "
+        "For multi-choice: one of the enumerated outcomes, INVALID, or UNCERTAIN.",
     )
     preliminary_confidence: float | None = Field(
         default=None,

@@ -4,6 +4,7 @@ Tests for Orchestrator Pipeline
 Tests registry-based agent selection, fail-closed behavior, and step overrides.
 """
 
+import json
 import pytest
 from datetime import datetime, timezone
 
@@ -21,6 +22,47 @@ from orchestrator import (
     resolve_market,
 )
 from core.schemas import DeterministicVerdict
+
+
+def _mock_llm_response() -> str:
+    """Standard mock LLM response for BTC prompt compilation."""
+    return json.dumps({
+        "market_id": "mk_btc_test",
+        "question": "Will BTC be above $100k?",
+        "event_definition": "price(BTC_USD) > 100000",
+        "target_entity": "bitcoin",
+        "predicate": "price above threshold",
+        "threshold": "100000",
+        "resolution_window": {
+            "start": "2025-01-01T00:00:00Z",
+            "end": "2025-12-31T23:59:59Z",
+        },
+        "resolution_deadline": "2025-12-31T23:59:59Z",
+        "data_requirements": [{
+            "requirement_id": "req_001",
+            "description": "Get BTC price",
+            "source_targets": [{
+                "source_id": "coingecko",
+                "uri": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+                "method": "GET",
+                "expected_content_type": "json",
+            }],
+            "selection_policy": {
+                "strategy": "single_best",
+                "min_sources": 1,
+                "max_sources": 1,
+                "quorum": 1,
+            },
+        }],
+        "resolution_rules": [
+            {"rule_id": "R_VALIDITY", "description": "Check validity", "priority": 100},
+            {"rule_id": "R_THRESHOLD", "description": "Compare to threshold", "priority": 80},
+            {"rule_id": "R_INVALID_FALLBACK", "description": "Fallback", "priority": 0},
+        ],
+        "allowed_sources": [
+            {"source_id": "coingecko", "kind": "api", "allow": True},
+        ],
+    })
 
 
 class TestPipelineConfig:
@@ -90,18 +132,17 @@ class TestPipelineAgentSelection:
     
     def test_selects_available_agent(self):
         """Test that pipeline selects available agents."""
-        ctx = AgentContext.create_minimal()
+        ctx = AgentContext.create_mock(llm_responses=[_mock_llm_response()])
         pipeline = Pipeline(context=ctx)
-        
-        # Should select fallback agent when no LLM available
+
         agent = pipeline._select_agent(
             AgentStep.PROMPT_ENGINEER,
             None,
             ctx,
         )
-        
+
         assert agent is not None
-        assert agent.name == "PromptEngineerFallback"
+        assert agent.name == "PromptEngineerLLM"
     
     def test_respects_override(self):
         """Test that overrides are respected."""
@@ -111,12 +152,12 @@ class TestPipelineAgentSelection:
         # Override to use fallback
         agent = pipeline._select_agent(
             AgentStep.PROMPT_ENGINEER,
-            "PromptEngineerFallback",
+            "PromptEngineerLLM",
             ctx,
         )
         
         assert agent is not None
-        assert agent.name == "PromptEngineerFallback"
+        assert agent.name == "PromptEngineerLLM"
     
     def test_production_fails_on_missing_override(self):
         """Test production mode fails when specified override not found."""
@@ -132,18 +173,18 @@ class TestPipelineAgentSelection:
             )
     
     def test_development_uses_fallback_on_missing_override(self):
-        """Test development mode uses fallback when override not found."""
-        ctx = AgentContext.create_minimal()
+        """Test development mode falls back when override not found."""
+        ctx = AgentContext.create_mock(llm_responses=[_mock_llm_response()])
         config = PipelineConfig(mode=ExecutionMode.DEVELOPMENT)
         pipeline = Pipeline(config=config, context=ctx)
-        
+
         # Should fall back to available agent
         agent = pipeline._select_agent(
             AgentStep.PROMPT_ENGINEER,
             "NonExistentAgent",
             ctx,
         )
-        
+
         assert agent is not None
 
 
@@ -199,13 +240,13 @@ class TestPipelineFailClosed:
 class TestPipelineExecution:
     """Tests for full pipeline execution."""
     
-    def test_run_with_minimal_context(self):
-        """Test running pipeline with minimal context."""
-        ctx = AgentContext.create_minimal()
-        
+    def test_run_with_mock_context(self):
+        """Test running pipeline with mock LLM context."""
+        ctx = AgentContext.create_mock(llm_responses=[_mock_llm_response()])
+
         # Use step overrides to ensure deterministic agents
         overrides = StepOverrides(
-            prompt_engineer="PromptEngineerFallback",
+            prompt_engineer="PromptEngineerLLM",
             collector="CollectorMock",
             auditor="AuditorRuleBased",
             judge="JudgeRuleBased",
@@ -217,9 +258,9 @@ class TestPipelineExecution:
             enable_sentinel_verify=True,
         )
         pipeline = Pipeline(config=config, context=ctx)
-        
+
         result = pipeline.run("Will BTC be above $100k?")
-        
+
         # Should complete (may have verification issues but should run)
         assert result.prompt_spec is not None
         assert result.tool_plan is not None
@@ -266,7 +307,7 @@ class TestFactoryFunctions:
         pipeline = create_test_pipeline()
         
         assert pipeline.config.mode == ExecutionMode.TEST
-        assert pipeline.config.step_overrides.prompt_engineer == "PromptEngineerFallback"
+        assert pipeline.config.step_overrides.prompt_engineer == "PromptEngineerLLM"
         assert pipeline.config.step_overrides.collector == "CollectorMock"
 
 
@@ -310,21 +351,21 @@ class TestIntegration:
     
     def test_pipeline_with_step_overrides(self):
         """Test pipeline with custom step overrides."""
-        ctx = AgentContext.create_minimal()
-        
+        ctx = AgentContext.create_mock(llm_responses=[_mock_llm_response()])
+
         overrides = StepOverrides(
-            prompt_engineer="PromptEngineerFallback",
+            prompt_engineer="PromptEngineerLLM",
             auditor="AuditorRuleBased",
         )
-        
+
         pipeline = create_pipeline(
             mode=ExecutionMode.DEVELOPMENT,
             context=ctx,
             step_overrides=overrides,
         )
-        
-        result = pipeline.run("Test question")
-        
+
+        result = pipeline.run("Will BTC be above $100k?")
+
         # Should run without errors related to agent selection
         agent_errors = [e for e in result.errors if "agent" in e.lower()]
         # Collector might fail but prompt engineer should work

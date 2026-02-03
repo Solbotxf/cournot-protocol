@@ -61,7 +61,7 @@ class LLMPromptCompiler:
     
     def compile(
         self,
-        ctx: "AgentContext",
+        ctx: AgentContext,
         user_input: str,
     ) -> tuple[PromptSpec, ToolPlan]:
         """
@@ -174,10 +174,19 @@ class LLMPromptCompiler:
             resolution_window.end,
         )
         
+        # Determine market type and possible outcomes
+        market_type = data.get("market_type", "binary")
+        possible_outcomes = data.get("possible_outcomes", ["YES", "NO"])
+        if market_type == "multi_choice" and possible_outcomes == ["YES", "NO"]:
+            # LLM indicated multi-choice but didn't provide outcomes; fall back to binary
+            market_type = "binary"
+        if market_type == "binary":
+            possible_outcomes = ["YES", "NO"]
+
         # Build resolution rules
         rules_data = data.get("resolution_rules", [])
         if not rules_data:
-            rules_data = self._default_resolution_rules()
+            rules_data = self._default_resolution_rules(market_type)
         
         resolution_rules = ResolutionRules(
             rules=[
@@ -221,6 +230,8 @@ class LLMPromptCompiler:
             allowed_sources=allowed_sources,
             min_provenance_tier=data.get("min_provenance_tier", 0),
             dispute_policy=dispute_policy,
+            market_type=market_type,
+            possible_outcomes=possible_outcomes,
         )
         
         # Build data requirements
@@ -336,12 +347,18 @@ class LLMPromptCompiler:
         except (ValueError, AttributeError):
             return default
     
-    def _default_resolution_rules(self) -> list[dict[str, Any]]:
+    def _default_resolution_rules(self, market_type: str = "binary") -> list[dict[str, Any]]:
         """Return default resolution rules."""
-        return [
+        rules = [
             {"rule_id": "R_VALIDITY", "description": "Check if evidence is sufficient and valid", "priority": 100},
             {"rule_id": "R_CONFLICT", "description": "Handle conflicting evidence from multiple sources", "priority": 90},
-            {"rule_id": "R_BINARY_DECISION", "description": "Map evidence to YES/NO outcome", "priority": 80},
+        ]
+        if market_type == "multi_choice":
+            rules.append({"rule_id": "R_MULTI_CHOICE", "description": "Match evidence against enumerated outcomes and select the best match", "priority": 80})
+        else:
+            rules.append({"rule_id": "R_BINARY_DECISION", "description": "Map evidence to YES/NO outcome", "priority": 80})
+        rules.extend([
             {"rule_id": "R_CONFIDENCE", "description": "Assign confidence score based on evidence quality", "priority": 70},
             {"rule_id": "R_INVALID_FALLBACK", "description": "Return INVALID if resolution is impossible", "priority": 0},
-        ]
+        ])
+        return rules

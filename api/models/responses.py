@@ -21,7 +21,7 @@ class RunSummary(BaseModel):
     """Summary of pipeline execution."""
     
     market_id: str = Field(..., description="Market identifier")
-    outcome: str = Field(..., description="Resolution outcome: YES, NO, or INVALID")
+    outcome: str = Field(..., description="Resolution outcome. For binary: YES/NO/INVALID. For multi-choice: one of the enumerated outcomes or INVALID.")
     confidence: float = Field(..., description="Confidence score (0.0-1.0)")
     por_root: str = Field(..., description="Proof of Reasoning root hash")
     prompt_spec_hash: str | None = Field(default=None)
@@ -70,7 +70,7 @@ class VerifyResponse(BaseModel):
     )
     por_root: str = Field(..., description="PoR root from the pack")
     market_id: str = Field(..., description="Market ID from the pack")
-    outcome: str = Field(..., description="Verdict outcome from the pack")
+    outcome: str = Field(..., description="Verdict outcome from the pack. For binary: YES/NO/INVALID. For multi-choice: one of the enumerated outcomes or INVALID.")
     checks: list[dict[str, Any]] = Field(default_factory=list)
     challenges: list[dict[str, Any]] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)

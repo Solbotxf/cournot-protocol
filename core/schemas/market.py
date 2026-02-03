@@ -8,7 +8,7 @@ and resolution policy.
 """
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -32,15 +32,6 @@ class ResolutionWindow(BaseModel):
         ...,
         description="End of the resolution window (UTC)",
     )
-
-    @model_validator(mode="after")
-    def validate_window(self) -> "ResolutionWindow":
-        """Ensure start is before or equal to end."""
-        if self.start > self.end:
-            raise ValueError(
-                f"Resolution window start ({self.start}) must be <= end ({self.end})"
-            )
-        return self
 
 
 class SourcePolicy(BaseModel):
@@ -209,10 +200,46 @@ class MarketSpec(BaseModel):
         ...,
         description="Policy for handling disputes",
     )
+    market_type: Literal["binary", "multi_choice"] = Field(
+        default="binary",
+        description="Type of market: 'binary' for YES/NO, 'multi_choice' for >2 discrete outcomes",
+    )
+    possible_outcomes: list[str] = Field(
+        default_factory=lambda: ["YES", "NO"],
+        description="List of possible outcomes. For binary: ['YES', 'NO']. For multi_choice: 2+ custom outcomes.",
+        min_length=2,
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Additional market metadata",
     )
+
+    @model_validator(mode="after")
+    def validate_market_type_outcomes(self) -> "MarketSpec":
+        """Validate that market_type and possible_outcomes are consistent."""
+        if self.market_type == "binary":
+            if self.possible_outcomes != ["YES", "NO"]:
+                raise ValueError(
+                    "Binary markets must have possible_outcomes=['YES', 'NO']"
+                )
+        else:  # multi_choice
+            if len(self.possible_outcomes) < 2:
+                raise ValueError(
+                    "Multi-choice markets must have at least 2 possible outcomes"
+                )
+            if "INVALID" in self.possible_outcomes:
+                raise ValueError(
+                    "'INVALID' must not be in possible_outcomes (it is always implicitly allowed)"
+                )
+        return self
+
+    def get_valid_outcomes(self) -> list[str]:
+        """Return all valid outcomes including INVALID."""
+        return self.possible_outcomes + ["INVALID"]
+
+    def is_valid_outcome(self, outcome: str) -> bool:
+        """Check if an outcome is valid for this market."""
+        return outcome in self.get_valid_outcomes()
 
     @field_validator("resolution_rules", mode="after")
     @classmethod
