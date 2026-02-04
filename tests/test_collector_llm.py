@@ -325,3 +325,112 @@ class TestCollectorLLMFallbackSelection:
 
         collector = get_collector(ctx, prefer_llm=False)
         assert not isinstance(collector, CollectorLLM)
+
+
+class TestCollectorLLMDeferredDiscovery:
+    """Tests for deferred source discovery."""
+
+    def test_deferred_discovery_generates_tool_call(self):
+        """Deferred requirement triggers discover tool call and returns evidence."""
+        # LLM response 1: search queries
+        query_response = json.dumps({
+            "queries": ["UN climate resolution 2026", "UN General Assembly climate vote"]
+        })
+
+        ctx = AgentContext.create_mock(llm_responses=[query_response])
+
+        requirements = [
+            DataRequirement(
+                requirement_id="req_001",
+                description="Check UN news for climate resolution",
+                source_targets=[],
+                selection_policy=SelectionPolicy(strategy="single_best"),
+                deferred_source_discovery=True,
+            ),
+        ]
+        prompt_spec = _make_prompt_spec(requirements=requirements)
+        tool_plan = _make_tool_plan(requirements=["req_001"])
+
+        collector = CollectorLLM()
+        result = collector.run(ctx, prompt_spec, tool_plan)
+
+        assert result.success
+        bundle, execution_log = result.output
+        assert len(bundle.items) == 1
+        item = bundle.items[0]
+        assert item.requirement_id == "req_001"
+        assert execution_log.total_calls == 1
+        call = execution_log.calls[0]
+        assert call.tool == "llm:discover"
+        assert call.input["deferred"] is True
+
+    def test_deferred_no_serper_returns_error(self):
+        """Without Serper API / HTTP client, deferred discovery returns error evidence."""
+        query_response = json.dumps({"queries": ["test query"]})
+
+        ctx = AgentContext.create_mock(llm_responses=[query_response])
+
+        requirements = [
+            DataRequirement(
+                requirement_id="req_001",
+                description="Check news",
+                source_targets=[],
+                selection_policy=SelectionPolicy(strategy="single_best"),
+                deferred_source_discovery=True,
+            ),
+        ]
+        prompt_spec = _make_prompt_spec(requirements=requirements)
+        tool_plan = _make_tool_plan(requirements=["req_001"])
+
+        collector = CollectorLLM()
+        result = collector.run(ctx, prompt_spec, tool_plan)
+
+        bundle, _ = result.output
+        assert len(bundle.items) == 1
+        item = bundle.items[0]
+        assert not item.success
+        assert "search results" in item.error.lower() or "serper" in item.error.lower()
+
+    def test_deferred_mixed_with_normal_requirements(self):
+        """A plan with both deferred and normal requirements works correctly."""
+        # LLM response 1: search queries for deferred req
+        query_response = json.dumps({"queries": ["test"]})
+        # LLM response 2: normal fetch for req_002
+        fetch_response = _good_llm_json()
+
+        ctx = AgentContext.create_mock(llm_responses=[query_response, fetch_response])
+
+        requirements = [
+            DataRequirement(
+                requirement_id="req_001",
+                description="Check news",
+                source_targets=[],
+                selection_policy=SelectionPolicy(strategy="single_best"),
+                deferred_source_discovery=True,
+            ),
+            DataRequirement(
+                requirement_id="req_002",
+                description="Get BTC price",
+                source_targets=[
+                    SourceTarget(source_id="coingecko", uri="https://api.coingecko.com/btc"),
+                ],
+                selection_policy=SelectionPolicy(strategy="single_best"),
+            ),
+        ]
+        prompt_spec = _make_prompt_spec(requirements=requirements)
+        tool_plan = _make_tool_plan(requirements=["req_001", "req_002"])
+
+        collector = CollectorLLM()
+        result = collector.run(ctx, prompt_spec, tool_plan)
+
+        bundle, execution_log = result.output
+        assert len(bundle.items) == 2
+        assert execution_log.total_calls == 2
+
+        # req_001 uses discover, req_002 uses normal fetch
+        discover_call = next(c for c in execution_log.calls if c.tool == "llm:discover")
+        fetch_call = next(
+            c for c in execution_log.calls if c.tool.startswith("llm:coingecko")
+        )
+        assert discover_call.input["requirement_id"] == "req_001"
+        assert fetch_call.input["requirement_id"] == "req_002"

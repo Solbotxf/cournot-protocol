@@ -98,6 +98,14 @@ class CollectionEngine:
                 ctx.warning(f"Requirement {req_id} not found in prompt_spec")
                 continue
             
+            # Skip deferred requirements — they need CollectorLLM
+            if requirement.deferred_source_discovery:
+                ctx.warning(
+                    f"Requirement {req_id} uses deferred_source_discovery "
+                    "but CollectionEngine cannot discover sources (needs CollectorLLM)"
+                )
+                continue
+
             # Execute based on selection strategy
             evidence_items = self._execute_requirement(
                 ctx, requirement, execution_log

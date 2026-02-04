@@ -495,7 +495,7 @@ class Pipeline:
     ) -> PipelineState:
         """Step 2: Collect evidence."""
         ctx = self._resolve_ctx(state.context, AgentStep.COLLECTOR)
-        ctx.logger.debug(f"getting llm client: {ctx.llm}")
+        # ctx.logger.debug(f"getting llm client: {ctx.llm}")
         
         if not state.prompt_spec or not state.tool_plan:
             state.add_error("Cannot collect evidence: missing prompt_spec or tool_plan")

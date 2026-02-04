@@ -195,10 +195,11 @@ class DataRequirement(BaseModel):
     Specifies what data is needed and from where it should be sourced.
 
     IMPORTANT:
-    - source_targets is REQUIRED and MUST contain at least 1 entry
+    - source_targets MUST contain at least 1 entry unless deferred_source_discovery is True
     - source_targets order is semantically meaningful (priority/fallback order)
     - source_targets order MUST be preserved (not sorted) during serialization
     - selection_policy is REQUIRED
+    - When deferred_source_discovery is True, source_targets may be empty
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -214,21 +215,25 @@ class DataRequirement(BaseModel):
         min_length=1,
     )
     source_targets: list[SourceTarget] = Field(
-        ...,
+        default_factory=list,
         description="Ordered list of source targets. Order is meaningful (priority/fallback). "
-        "MUST contain at least 1 entry.",
-        min_length=1,
+        "Empty when deferred_source_discovery is True (collector will discover sources).",
     )
     selection_policy: SelectionPolicy = Field(
         ...,
         description="Policy for selecting from multiple sources",
+    )
+    deferred_source_discovery: bool = Field(
+        default=False,
+        description="When True, source_targets is intentionally empty. "
+        "The collector agent will discover and finalize data sources at resolve time.",
     )
     min_provenance_tier: int = Field(
         default=0,
         description="Minimum provenance tier required for this data",
         ge=0,
     )
-    
+
     expected_fields: list[str] | None = Field(
         default=None,
         description="Optional list of expected JSON keys; None means no filtering.",
@@ -242,9 +247,12 @@ class DataRequirement(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_targets(self) -> "DataRequirement":
-        """Ensure source_targets has at least one entry."""
-        if not self.source_targets:
-            raise ValueError("source_targets MUST contain at least 1 entry")
+        """Ensure source_targets is non-empty unless deferred."""
+        if not self.source_targets and not self.deferred_source_discovery:
+            raise ValueError(
+                "source_targets MUST contain at least 1 entry "
+                "(or set deferred_source_discovery=True)"
+            )
         return self
 
     def get_source_target_by_id(self, source_id: str) -> SourceTarget | None:

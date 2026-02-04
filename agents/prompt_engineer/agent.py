@@ -120,8 +120,14 @@ class PromptEngineerLLM(BaseAgent):
                 message=f"Has {len(prompt_spec.data_requirements)} data requirements",
             ))
         
-        # Check 2: All requirements have source targets
+        # Check 2: All requirements have source targets (unless deferred)
         for req in prompt_spec.data_requirements:
+            if req.deferred_source_discovery:
+                checks.append(CheckResult.passed(
+                    check_id=f"req_{req.requirement_id}_deferred",
+                    message=f"Requirement {req.requirement_id} deferred to collector",
+                ))
+                continue
             if not req.source_targets:
                 checks.append(CheckResult.failed(
                     check_id=f"req_{req.requirement_id}_has_sources",
