@@ -20,3 +20,4 @@ httpx>=0.24.0
 
 requests>=2.0
 openai
+python-dotenv>=1.0.0
