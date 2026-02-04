@@ -70,6 +70,10 @@ class ResolveRequest(BaseModel):
         default="development",
         description="Execution mode for agent selection",
     )
+    include_raw_content: bool = Field(
+        default=False,
+        description="Include raw_content in evidence_bundle items (omitted by default to reduce size)",
+    )
 
 
 class ResolveResponse(BaseModel):
@@ -168,10 +172,15 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
 
         result = pipeline.run_from_prompt(prompt_spec, tool_plan)
 
-        # Build artifacts dict
+        # Build artifacts dict; omit raw_content unless requested
         artifacts: dict[str, Any] = {}
         if result.evidence_bundle:
-            artifacts["evidence_bundle"] = result.evidence_bundle.model_dump(mode="json")
+            eb = result.evidence_bundle.model_dump(mode="json")
+            if not request.include_raw_content:
+                for item in eb.get("items", []):
+                    item["raw_content"] = None
+                    item["parsed_value"] = None
+            artifacts["evidence_bundle"] = eb
         if result.audit_trace:
             artifacts["reasoning_trace"] = result.audit_trace.model_dump(mode="json")
         if result.verdict:
