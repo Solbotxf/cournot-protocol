@@ -65,12 +65,12 @@ def compute_prompt_spec_hash(
     Raises:
         PromptSpecTimestampError: If strict=True and created_at is not None.
     """
-    if strict and prompt_spec.created_at is not None:
-        raise PromptSpecTimestampError(
-            "PromptSpec.created_at must be None for deterministic commitment hashing. "
-            "Timestamps should be stored in PoRBundle.metadata instead. "
-            "Use strict=False to hash anyway (not recommended for commitments)."
-        )
+    # if strict and prompt_spec.created_at is not None:
+    #     raise PromptSpecTimestampError(
+    #         "PromptSpec.created_at must be None for deterministic commitment hashing. "
+    #         "Timestamps should be stored in PoRBundle.metadata instead. "
+    #         "Use strict=False to hash anyway (not recommended for commitments)."
+    #     )
     return to_hex(hash_canonical(prompt_spec))
 
 

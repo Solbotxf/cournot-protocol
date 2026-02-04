@@ -34,6 +34,16 @@ from orchestrator.sop_executor import PipelineState, SOPExecutor, make_step
 logger = logging.getLogger(__name__)
 
 
+# Map pipeline steps to AgentsConfig attribute names
+_STEP_TO_AGENT_KEY = {
+    AgentStep.PROMPT_ENGINEER: "prompt_engineer",
+    AgentStep.COLLECTOR: "collector",
+    AgentStep.AUDITOR: "auditor",
+    AgentStep.JUDGE: "judge",
+    AgentStep.SENTINEL: "sentinel",
+}
+
+
 # =============================================================================
 # Execution Mode
 # =============================================================================
@@ -227,7 +237,19 @@ class Pipeline:
             errors.append("NETWORK capability required but not available")
         
         return errors
-    
+
+    def _resolve_ctx(self, ctx: AgentContext, step: AgentStep) -> AgentContext:
+        """Return ctx with per-agent LLM override applied, if configured."""
+        if ctx.config is None:
+            return ctx
+        agent_key = _STEP_TO_AGENT_KEY.get(step)
+        if not agent_key:
+            return ctx
+        agent_cfg = getattr(ctx.config.agents, agent_key, None)
+        if not agent_cfg or agent_cfg.llm_override is None:
+            return ctx
+        return ctx.with_llm_override(agent_cfg.llm_override)
+
     def _select_agent(
         self,
         step: AgentStep,
@@ -419,7 +441,7 @@ class Pipeline:
         override: Optional[str],
     ) -> PipelineState:
         """Step 1: Compile user input into PromptSpec and ToolPlan."""
-        ctx = state.context
+        ctx = self._resolve_ctx(state.context, AgentStep.PROMPT_ENGINEER)
         
         try:
             agent = self._select_agent(AgentStep.PROMPT_ENGINEER, override, ctx)
@@ -472,7 +494,8 @@ class Pipeline:
         override: Optional[str],
     ) -> PipelineState:
         """Step 2: Collect evidence."""
-        ctx = state.context
+        ctx = self._resolve_ctx(state.context, AgentStep.COLLECTOR)
+        ctx.logger.debug(f"getting llm client: {ctx.llm}")
         
         if not state.prompt_spec or not state.tool_plan:
             state.add_error("Cannot collect evidence: missing prompt_spec or tool_plan")
@@ -514,7 +537,7 @@ class Pipeline:
         override: Optional[str],
     ) -> PipelineState:
         """Step 3: Produce reasoning trace."""
-        ctx = state.context
+        ctx = self._resolve_ctx(state.context, AgentStep.AUDITOR)
         
         if not state.prompt_spec or not state.evidence_bundle:
             state.add_error("Cannot audit: missing prompt_spec or evidence_bundle")
@@ -559,7 +582,7 @@ class Pipeline:
         override: Optional[str],
     ) -> PipelineState:
         """Step 4: Produce verdict."""
-        ctx = state.context
+        ctx = self._resolve_ctx(state.context, AgentStep.JUDGE)
         
         if not state.prompt_spec or not state.evidence_bundle or not state.audit_trace:
             state.add_error("Cannot judge: missing required artifacts")
@@ -642,7 +665,7 @@ class Pipeline:
         override: Optional[str],
     ) -> PipelineState:
         """Step 6: Verify with Sentinel."""
-        ctx = state.context
+        ctx = self._resolve_ctx(state.context, AgentStep.SENTINEL)
         
         if not all([state.por_bundle, state.prompt_spec, state.evidence_bundle, 
                     state.audit_trace, state.verdict]):

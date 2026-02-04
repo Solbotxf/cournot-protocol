@@ -285,6 +285,32 @@ class GoogleProvider(LLMProvider):
         )
 
 
+class GrokProvider(OpenAIProvider):
+    """
+    Grok (xAI) API provider.
+
+    Uses the OpenAI-compatible endpoint at https://api.x.ai/v1.
+    Requires: openai package
+    """
+
+    def __init__(
+        self,
+        model: str = "grok-4-latest",
+        *,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ) -> None:
+        super().__init__(
+            model=model,
+            api_key=api_key or os.getenv("XAI_API_KEY"),
+            base_url=base_url or "https://api.x.ai/v1",
+        )
+
+    @property
+    def name(self) -> str:
+        return "grok"
+
+
 class MockProvider(LLMProvider):
     """
     Mock provider for testing.
@@ -386,6 +412,8 @@ def create_provider(
         return AnthropicProvider(model=model or "claude-sonnet-4-20250514", **kwargs)
     elif provider_name == "google":
         return GoogleProvider(model=model or "gemini-1.5-pro", **kwargs)
+    elif provider_name == "grok":
+        return GrokProvider(model=model or "grok-4-latest", **kwargs)
     elif provider_name == "mock":
         return MockProvider(model=model or "mock-model", **kwargs)
     else:

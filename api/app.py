@@ -11,6 +11,7 @@ Usage:
 """
 
 import logging
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,9 +20,25 @@ from api.routes import health, run, verify, replay, steps
 from api.errors import APIError, api_error_handler, generic_error_handler
 
 
-# Configure logging
+# Configure logging — respects COURNOT_LOG_LEVEL env var and cournot.json log_level
+def _resolve_log_level() -> int:
+    """Resolve log level from env var or cournot.json, defaulting to INFO."""
+    raw = os.getenv("COURNOT_LOG_LEVEL")
+    if raw is None:
+        try:
+            import json
+            from pathlib import Path
+            cfg_path = Path.cwd() / "cournot.json"
+            if cfg_path.exists():
+                with open(cfg_path) as f:
+                    raw = json.load(f).get("log_level")
+        except Exception:
+            pass
+    return getattr(logging, (raw or "INFO").upper(), logging.INFO)
+
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=_resolve_log_level(),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 

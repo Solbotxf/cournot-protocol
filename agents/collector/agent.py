@@ -3,17 +3,22 @@ Collector Agent
 
 Executes ToolPlans to collect evidence from external sources.
 
-Two implementations:
+Three implementations:
+- CollectorLLM: Uses LLM web browsing to fetch and interpret content (preferred)
 - CollectorHTTP: Makes real HTTP requests (production)
 - CollectorMock: Returns mock data (testing)
 
 Selection logic:
+- If ctx.llm is available → use LLM collector
 - If ctx.http is available → use HTTP collector
 - Otherwise → use mock collector
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from typing import Any, TYPE_CHECKING
 
 from agents.base import AgentCapability, AgentResult, AgentStep, BaseAgent
@@ -21,7 +26,10 @@ from agents.registry import register_agent
 from core.schemas import (
     CheckResult,
     EvidenceBundle,
+    EvidenceItem,
+    Provenance,
     PromptSpec,
+    ToolCallRecord,
     ToolExecutionLog,
     ToolPlan,
     VerificationResult,
@@ -32,6 +40,7 @@ from .adapters import MockAdapter, get_adapter
 
 if TYPE_CHECKING:
     from agents.context import AgentContext
+    from core.schemas import DataRequirement, SourceTarget
 
 
 class CollectorHTTP(BaseAgent):
@@ -314,23 +323,341 @@ class CollectorMock(BaseAgent):
         )
 
 
+COLLECTOR_LLM_SYSTEM_PROMPT = (
+    "You are a data collection agent. Visit the given URL and extract specific data. "
+    "Return ONLY valid JSON with the following schema: "
+    '{"success": true/false, "extracted_fields": {...}, "parsed_value": ..., '
+    '"content_summary": "...", "error": null or "..."}'
+)
+
+
+class CollectorLLM(BaseAgent):
+    """
+    LLM-based Collector Agent.
+
+    Uses LLM web browsing capability to fetch and interpret URL content.
+    Instead of raw HTTP fetching, passes URL + extraction instructions to the LLM,
+    which browses and returns structured data.
+
+    Features:
+    - LLM-interpreted data extraction
+    - Automatic JSON repair loop
+    - Provenance tier 2 (LLM-interpreted)
+    - Higher priority than CollectorHTTP for automatic selection
+    """
+
+    _name = "CollectorLLM"
+    _version = "v1"
+    _capabilities = {AgentCapability.LLM}
+    MAX_RETRIES = 2
+
+    def run(
+        self,
+        ctx: "AgentContext",
+        prompt_spec: PromptSpec,
+        tool_plan: ToolPlan,
+    ) -> AgentResult:
+        """
+        Execute collection plan using LLM web browsing.
+
+        Args:
+            ctx: Agent context with LLM client
+            prompt_spec: The prompt specification
+            tool_plan: The tool plan to execute
+
+        Returns:
+            AgentResult with (EvidenceBundle, ToolExecutionLog) as output
+        """
+        ctx.info(f"CollectorLLM executing plan {tool_plan.plan_id}")
+
+        if ctx.llm is None:
+            return AgentResult.failure(error="LLM client not available")
+
+        bundle = EvidenceBundle(
+            bundle_id=f"llm_{tool_plan.plan_id}",
+            market_id=prompt_spec.market_id,
+            plan_id=tool_plan.plan_id,
+        )
+
+        execution_log = ToolExecutionLog(
+            plan_id=tool_plan.plan_id,
+            started_at=ctx.now().isoformat(),
+        )
+
+        for req_id in tool_plan.requirements:
+            requirement = prompt_spec.get_requirement_by_id(req_id)
+            ctx.info(f"requirement: {requirement} with id {req_id}")
+            if not requirement:
+                continue
+
+            for target in requirement.source_targets:
+                call_record = ToolCallRecord(
+                    tool=f"llm:{target.source_id}",
+                    input={"uri": target.uri, "requirement_id": req_id},
+                    started_at=ctx.now().isoformat(),
+                )
+
+                evidence = self._fetch_via_llm(ctx, target, requirement, prompt_spec)
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {
+                    "success": evidence.success,
+                    "evidence_id": evidence.evidence_id,
+                }
+                if evidence.error:
+                    call_record.error = evidence.error
+
+                execution_log.add_call(call_record)
+                bundle.add_item(evidence)
+
+                # For single_best, stop after first source
+                if requirement.selection_policy.strategy == "single_best":
+                    break
+
+        bundle.collected_at = ctx.now()
+        bundle.requirements_fulfilled = list(set(
+            item.requirement_id for item in bundle.items if item.success
+        ))
+        bundle.requirements_unfulfilled = [
+            r for r in tool_plan.requirements
+            if r not in bundle.requirements_fulfilled
+        ]
+        execution_log.ended_at = ctx.now().isoformat()
+
+        verification = self._validate_output(bundle, tool_plan)
+
+        ctx.info(
+            f"Collection complete: {bundle.total_sources_succeeded}/"
+            f"{bundle.total_sources_attempted} sources succeeded, "
+            f"{len(bundle.requirements_fulfilled)}/{len(tool_plan.requirements)} requirements fulfilled"
+        )
+
+        return AgentResult(
+            output=(bundle, execution_log),
+            verification=verification,
+            receipts=ctx.get_receipt_refs(),
+            success=bundle.has_evidence,
+            error=None if bundle.has_evidence else "No evidence collected",
+            metadata={
+                "collector": "llm",
+                "bundle_id": bundle.bundle_id,
+                "total_sources_attempted": bundle.total_sources_attempted,
+                "total_sources_succeeded": bundle.total_sources_succeeded,
+                "requirements_fulfilled": bundle.requirements_fulfilled,
+                "requirements_unfulfilled": bundle.requirements_unfulfilled,
+            },
+        )
+
+    def _fetch_via_llm(
+        self,
+        ctx: "AgentContext",
+        target: "SourceTarget",
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+    ) -> EvidenceItem:
+        """
+        Fetch and extract data from a URL using LLM web browsing.
+
+        Args:
+            ctx: Agent context
+            target: Source target with URI
+            requirement: Data requirement to fulfill
+            prompt_spec: The prompt specification
+
+        Returns:
+            EvidenceItem with extracted data or error
+        """
+        semantics = prompt_spec.prediction_semantics
+        evidence_id = self._generate_evidence_id(requirement.requirement_id, target)
+
+        user_prompt = (
+            f"Visit this URL: {target.uri}\n\n"
+            f"Extract the following data:\n"
+            f"- Requirement: {requirement.description}\n"
+            f"- Entity: {semantics.target_entity}\n"
+            f"- Predicate: {semantics.predicate}\n"
+            f"- Threshold: {semantics.threshold or 'N/A'}\n\n"
+            f"Return ONLY valid JSON with this schema:\n"
+            f'{{"success": true/false, "extracted_fields": {{...relevant fields...}}, '
+            f'"parsed_value": <the key value extracted>, '
+            f'"content_summary": "<brief summary of page content>", '
+            f'"error": null}}'
+        )
+
+        messages = [
+            {"role": "system", "content": COLLECTOR_LLM_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        response = ctx.llm.chat(messages)
+        raw_output = response.content
+
+        ctx.info(f"collector LLM response: {raw_output}")
+        # Parse with retry loop
+        last_error: str | None = None
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                parsed = self._extract_json(raw_output)
+                return self._build_evidence_item(
+                    ctx, target, requirement.requirement_id, parsed, raw_output
+                )
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                last_error = str(e)
+                ctx.warning(f"JSON parse attempt {attempt + 1} failed: {last_error}")
+
+                if attempt < self.MAX_RETRIES:
+                    repair_prompt = (
+                        f"The JSON was invalid: {last_error}. "
+                        "Please fix and return valid JSON only."
+                    )
+                    messages.append({"role": "assistant", "content": raw_output})
+                    messages.append({"role": "user", "content": repair_prompt})
+
+                    response = ctx.llm.chat(messages)
+                    raw_output = response.content
+
+        # All retries exhausted — return error evidence
+        ctx.error(f"LLM collection failed after {self.MAX_RETRIES + 1} attempts: {last_error}")
+        return EvidenceItem(
+            evidence_id=evidence_id,
+            requirement_id=requirement.requirement_id,
+            provenance=Provenance(
+                source_id=target.source_id,
+                source_uri=target.uri,
+                tier=2,
+                fetched_at=ctx.now(),
+                content_hash=self._hash_content(raw_output),
+            ),
+            success=False,
+            error=f"JSON parse failed after {self.MAX_RETRIES + 1} attempts: {last_error}",
+            raw_content=raw_output[:100],
+        )
+
+    def _build_evidence_item(
+        self,
+        ctx: "AgentContext",
+        target: "SourceTarget",
+        requirement_id: str,
+        parsed: dict[str, Any],
+        raw_output: str,
+    ) -> EvidenceItem:
+        """Build an EvidenceItem from parsed LLM response."""
+        evidence_id = self._generate_evidence_id(requirement_id, target)
+        content_summary = parsed.get("content_summary", "")
+        extracted = self._truncate_extracted_fields(parsed.get("extracted_fields", {}))
+        success = parsed.get("success", True)
+
+        return EvidenceItem(
+            evidence_id=evidence_id,
+            requirement_id=requirement_id,
+            provenance=Provenance(
+                source_id=target.source_id,
+                source_uri=target.uri,
+                tier=2,
+                fetched_at=ctx.now(),
+                content_hash=self._hash_content(raw_output),
+            ),
+            raw_content=str(content_summary)[:100],
+            parsed_value=parsed.get("parsed_value"),
+            extracted_fields=extracted,
+            success=success,
+            error=parsed.get("error"),
+        )
+
+    def _validate_output(
+        self,
+        bundle: EvidenceBundle,
+        tool_plan: ToolPlan,
+    ) -> VerificationResult:
+        """Validate collection results."""
+        checks: list[CheckResult] = []
+
+        if bundle.has_evidence:
+            checks.append(CheckResult.passed(
+                check_id="has_evidence",
+                message=f"Collected {len(bundle.items)} evidence items",
+            ))
+        else:
+            checks.append(CheckResult.failed(
+                check_id="has_evidence",
+                message="No evidence was collected",
+            ))
+
+        unfulfilled = bundle.requirements_unfulfilled
+        if not unfulfilled:
+            checks.append(CheckResult.passed(
+                check_id="requirements_fulfilled",
+                message="All requirements fulfilled",
+            ))
+        else:
+            checks.append(CheckResult.warning(
+                check_id="requirements_fulfilled",
+                message=f"Unfulfilled requirements: {unfulfilled}",
+            ))
+
+        ok = all(c.ok for c in checks)
+        return VerificationResult(ok=ok, checks=checks)
+
+    @staticmethod
+    def _generate_evidence_id(requirement_id: str, target: "SourceTarget") -> str:
+        """Generate a deterministic evidence ID."""
+        key = f"{requirement_id}:{target.source_id}:{target.uri}:{target.operation}:{target.search_query}"
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _hash_content(content: str) -> str:
+        """Hash content using SHA256."""
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    @staticmethod
+    def _extract_json(text: str) -> dict[str, Any]:
+        """Extract JSON from LLM response text."""
+        # Try markdown code block first
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if json_match:
+            return json.loads(json_match.group(1).strip())
+        # Fall back to raw {…} extraction
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            return json.loads(text[start:end])
+        return json.loads(text.strip())
+
+    @staticmethod
+    def _truncate_extracted_fields(
+        fields: dict[str, Any], max_value_len: int = 500
+    ) -> dict[str, Any]:
+        """Truncate extracted field values to prevent oversized evidence."""
+        truncated = {}
+        for key, value in fields.items():
+            if isinstance(value, str) and len(value) > max_value_len:
+                truncated[key] = value[:max_value_len] + "..."
+            else:
+                truncated[key] = value
+        return truncated
+
+
 def get_collector(
     ctx: "AgentContext",
     *,
+    prefer_llm: bool = True,
     prefer_http: bool = True,
     mock_responses: dict[str, Any] | None = None,
 ) -> BaseAgent:
     """
     Get the appropriate collector based on context.
-    
+
     Args:
         ctx: Agent context
+        prefer_llm: If True and LLM client available, use LLM collector
         prefer_http: If True and HTTP client available, use HTTP collector
         mock_responses: Mock responses for mock collector
-    
+
     Returns:
-        CollectorHTTP or CollectorMock
+        CollectorLLM, CollectorHTTP, or CollectorMock
     """
+    if prefer_llm and ctx.llm is not None:
+        return CollectorLLM()
     if prefer_http and ctx.http is not None:
         return CollectorHTTP()
     return CollectorMock(mock_responses=mock_responses)
@@ -364,12 +691,20 @@ def _register_agents() -> None:
     """Register collector agents."""
     register_agent(
         step=AgentStep.COLLECTOR,
+        name="CollectorLLM",
+        factory=lambda ctx: CollectorLLM(),
+        capabilities={AgentCapability.LLM},
+        priority=150,  # Highest - preferred when LLM available
+    )
+
+    register_agent(
+        step=AgentStep.COLLECTOR,
         name="CollectorHTTP",
         factory=lambda ctx: CollectorHTTP(),
         capabilities={AgentCapability.NETWORK},
-        priority=100,  # Primary
+        priority=100,  # Primary HTTP
     )
-    
+
     register_agent(
         step=AgentStep.COLLECTOR,
         name="CollectorMock",

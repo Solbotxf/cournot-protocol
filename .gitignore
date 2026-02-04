@@ -1,4 +1,5 @@
 venv/
+.env
 cournot.json
 code.md
 *.pyc
