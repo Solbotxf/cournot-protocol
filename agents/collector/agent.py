@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from typing import Any, TYPE_CHECKING
 
@@ -330,6 +331,32 @@ COLLECTOR_LLM_SYSTEM_PROMPT = (
     '"content_summary": "...", "error": null or "..."}'
 )
 
+DISCOVERY_QUERY_SYSTEM_PROMPT = (
+    "You generate web search queries for a prediction market resolution system. "
+    "Given a data requirement and market context, output 1-3 targeted search queries "
+    "that would find authoritative, official, or reliable sources.\n\n"
+    "Prefer queries that target:\n"
+    "- Official government/organization websites\n"
+    "- Major news agencies (Reuters, AP, BBC)\n"
+    "- Domain-specific authoritative sources\n\n"
+    'Return ONLY valid JSON: {"queries": ["query1", "query2", ...]}'
+)
+
+DEFERRED_DISCOVERY_SYSTEM_PROMPT = (
+    "You are a source discovery agent for a prediction market resolution system. "
+    "You will be given search results about a topic. "
+    "Your task is to analyze the results, identify the most authoritative and relevant sources, "
+    "and extract key evidence.\n\n"
+    "Return ONLY valid JSON with this schema:\n"
+    '{"success": true/false, '
+    '"discovered_sources": [{"url": "...", "title": "...", "relevance": "high/medium/low"}], '
+    '"extracted_fields": {...relevant data extracted from search results...}, '
+    '"parsed_value": <the key finding>, '
+    '"content_summary": "<synthesis of findings from all sources>", '
+    '"confidence": 0.0-1.0, '
+    '"error": null}'
+)
+
 
 class CollectorLLM(BaseAgent):
     """
@@ -388,6 +415,29 @@ class CollectorLLM(BaseAgent):
             requirement = prompt_spec.get_requirement_by_id(req_id)
             ctx.info(f"requirement: {requirement} with id {req_id}")
             if not requirement:
+                continue
+
+            # Handle deferred source discovery
+            if requirement.deferred_source_discovery:
+                evidence = self._discover_sources(ctx, requirement, prompt_spec)
+                call_record = ToolCallRecord(
+                    tool="llm:discover",
+                    input={
+                        "requirement_id": req_id,
+                        "description": requirement.description,
+                        "deferred": True,
+                    },
+                    started_at=ctx.now().isoformat(),
+                )
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {
+                    "success": evidence.success,
+                    "evidence_id": evidence.evidence_id,
+                }
+                if evidence.error:
+                    call_record.error = evidence.error
+                execution_log.add_call(call_record)
+                bundle.add_item(evidence)
                 continue
 
             for target in requirement.source_targets:
@@ -532,6 +582,193 @@ class CollectorLLM(BaseAgent):
             error=f"JSON parse failed after {self.MAX_RETRIES + 1} attempts: {last_error}",
             raw_content=raw_output[:100],
         )
+
+    def _discover_sources(
+        self,
+        ctx: "AgentContext",
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+    ) -> EvidenceItem:
+        """
+        Discover sources for a deferred requirement using LLM + web search.
+
+        Flow:
+        1. Ask LLM to generate search queries from the requirement context
+        2. Execute queries via Serper API
+        3. Feed search results to LLM to summarize and extract evidence
+        """
+        semantics = prompt_spec.prediction_semantics
+        evidence_id = hashlib.sha256(
+            f"discover:{requirement.requirement_id}".encode()
+        ).hexdigest()[:16]
+
+        # Step 1: Generate search queries via LLM
+        query_prompt = (
+            f"Generate search queries for this data requirement:\n"
+            f"- Requirement: {requirement.description}\n"
+            f"- Market question: {prompt_spec.market.question}\n"
+            f"- Entity: {semantics.target_entity}\n"
+            f"- Predicate: {semantics.predicate}\n"
+            f"- Threshold: {semantics.threshold or 'N/A'}\n"
+        )
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": DISCOVERY_QUERY_SYSTEM_PROMPT},
+            {"role": "user", "content": query_prompt},
+        ]
+        response = ctx.llm.chat(messages)
+
+        try:
+            query_data = self._extract_json(response.content)
+            queries = query_data.get("queries", [])[:3]
+        except (json.JSONDecodeError, KeyError):
+            queries = [f"{semantics.target_entity} {semantics.predicate}"]
+
+        if not queries:
+            queries = [f"{semantics.target_entity} {semantics.predicate}"]
+
+        # Step 2: Execute search queries via Serper
+        search_results = self._execute_search_queries(ctx, queries)
+
+        if not search_results:
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement.requirement_id,
+                provenance=Provenance(
+                    source_id="discover",
+                    source_uri="serper:search",
+                    tier=1,
+                    fetched_at=ctx.now(),
+                ),
+                success=False,
+                error="No search results found (Serper API may not be configured)",
+            )
+
+        # Step 3: Feed search results to LLM for synthesis
+        results_text = "\n\n".join(
+            f"[{i+1}] {r['title']}\n{r['snippet']}\n{r['url']}"
+            for i, r in enumerate(search_results)
+        )
+
+        synthesis_prompt = (
+            f"Analyze these search results for the following requirement:\n"
+            f"- Requirement: {requirement.description}\n"
+            f"- Market question: {prompt_spec.market.question}\n"
+            f"- Entity: {semantics.target_entity}\n"
+            f"- Predicate: {semantics.predicate}\n\n"
+            f"Search results:\n{results_text}\n\n"
+            f"Identify authoritative sources, extract relevant evidence, and provide "
+            f"a confidence score (0.0-1.0) for how well the evidence addresses the requirement."
+        )
+
+        messages = [
+            {"role": "system", "content": DEFERRED_DISCOVERY_SYSTEM_PROMPT},
+            {"role": "user", "content": synthesis_prompt},
+        ]
+        response = ctx.llm.chat(messages)
+
+        # Parse synthesis response (with retry)
+        last_error: str | None = None
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                parsed = self._extract_json(response.content)
+                extracted = self._truncate_extracted_fields(
+                    parsed.get("extracted_fields", {})
+                )
+
+                # Include discovered_sources in extracted_fields
+                discovered = parsed.get("discovered_sources", [])
+                if discovered:
+                    extracted["discovered_sources"] = discovered
+
+                return EvidenceItem(
+                    evidence_id=evidence_id,
+                    requirement_id=requirement.requirement_id,
+                    provenance=Provenance(
+                        source_id="discover",
+                        source_uri="serper:search",
+                        tier=2,
+                        fetched_at=ctx.now(),
+                        content_hash=self._hash_content(response.content),
+                    ),
+                    raw_content=str(parsed.get("content_summary", ""))[:100],
+                    parsed_value=parsed.get("parsed_value"),
+                    extracted_fields=extracted,
+                    success=parsed.get("success", True),
+                    error=parsed.get("error"),
+                )
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                last_error = str(e)
+                if attempt < self.MAX_RETRIES:
+                    repair_prompt = (
+                        f"The JSON was invalid: {last_error}. "
+                        "Please fix and return valid JSON only."
+                    )
+                    messages.append({"role": "assistant", "content": response.content})
+                    messages.append({"role": "user", "content": repair_prompt})
+                    response = ctx.llm.chat(messages)
+
+        return EvidenceItem(
+            evidence_id=evidence_id,
+            requirement_id=requirement.requirement_id,
+            provenance=Provenance(
+                source_id="discover",
+                source_uri="serper:search",
+                tier=1,
+                fetched_at=ctx.now(),
+            ),
+            success=False,
+            error=f"Discovery synthesis failed: {last_error}",
+        )
+
+    def _execute_search_queries(
+        self,
+        ctx: "AgentContext",
+        queries: list[str],
+    ) -> list[dict[str, str]]:
+        """Execute search queries via Serper API and return combined results."""
+        api_key = os.getenv("SERPER_API_KEY", "").strip()
+        if ctx.config and hasattr(ctx.config, "serper") and ctx.config.serper:
+            api_key = (ctx.config.serper.api_key or "").strip() or api_key
+
+        if not api_key or not ctx.http:
+            ctx.warning("Serper API not configured for deferred source discovery")
+            return []
+
+        all_results: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        for query in queries:
+            try:
+                response = ctx.http.post(
+                    "https://google.serper.dev/search",
+                    headers={
+                        "X-API-KEY": api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"q": query},
+                    timeout=30.0,
+                )
+                if not response.ok:
+                    ctx.warning(
+                        f"Serper search failed for '{query}': HTTP {response.status_code}"
+                    )
+                    continue
+
+                data = response.json()
+                for item in data.get("organic", [])[:5]:
+                    url = item.get("link", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        all_results.append({
+                            "title": item.get("title", ""),
+                            "snippet": item.get("snippet", ""),
+                            "url": url,
+                        })
+            except Exception as e:
+                ctx.warning(f"Serper search error for '{query}': {e}")
+
+        return all_results
 
     def _build_evidence_item(
         self,

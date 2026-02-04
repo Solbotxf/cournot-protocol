@@ -56,6 +56,7 @@ There are two market types:
     {
       "requirement_id": "req_001",
       "description": "what data is needed",
+      "deferred_source_discovery": false,
       "source_targets": [
         {
           "source_id": "http|web|polymarket|exchange",
@@ -94,6 +95,27 @@ There are two market types:
 }
 ```
 
+## Deferred Source Discovery
+
+When the user does NOT specify concrete data sources (URLs, APIs, exchanges) and instead
+refers to general information like "news", "public information", "official announcements",
+"media reports", etc.:
+
+1. Still create the data_requirement with a clear description of what data is needed
+2. Set `"deferred_source_discovery": true`
+3. Leave `"source_targets": []` (empty array)
+4. The collector agent will discover appropriate sources at resolve time
+
+Only use deferred discovery when:
+- The user says data should come from news, public info, announcements, etc.
+- No specific URL, API, or data provider is mentioned or implied
+- The topic requires current/breaking information that can't be pinned to a fixed URL
+
+Do NOT use deferred discovery when:
+- The user mentions specific sources (e.g. "CoinGecko", "Polymarket", a URL)
+- Well-known public APIs exist for the data (e.g. crypto prices → exchange APIs)
+- The data has a canonical source (e.g. sports scores, stock prices)
+
 ## Source Selection Guidelines
 
 - **operation** (optional): "fetch" or "search". Omit for direct fetch. For news/government sites (e.g. un.org, fmprc.gov.cn) where the homepage rarely has the needed info, prefer **operation: "search"** and provide **search_query** (e.g. site:english.www.gov.cn "Keir Starmer" visit China).
@@ -119,7 +141,7 @@ For Polymarket questions:
 ## Important Rules
 
 1. NEVER invent URLs - use only well-known, publicly accessible APIs
-2. ALWAYS include at least one data source with a valid URI
+2. Include data sources with valid URIs when specific sources are known. Use deferred_source_discovery when sources should be determined at resolve time (see Deferred Source Discovery section).
 3. For binary markets, event definitions MUST be evaluable as boolean expressions. For multi-choice, they should identify which outcome matches.
 4. For numeric thresholds, be explicit about comparison operators (>, >=, <, <=, ==)
 5. If the question is ambiguous, make reasonable assumptions and list them

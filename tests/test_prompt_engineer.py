@@ -15,7 +15,10 @@ from agents.prompt_engineer import (
     compile_prompt,
     get_prompt_engineer,
 )
+from pydantic import ValidationError
+
 from core.schemas import PromptSpec, ToolPlan
+from core.schemas.prompts import DataRequirement, SelectionPolicy
 
 
 class TestPromptEngineerLLMAgent:
@@ -164,6 +167,78 @@ class TestLLMCompilerJSONExtraction:
         text = '{"key": "value"}'
         result = compiler._extract_json(text)
         assert result == {"key": "value"}
+
+
+class TestDeferredSourceDiscovery:
+    """Tests for deferred source discovery feature."""
+
+    def test_deferred_source_discovery_end_to_end(self):
+        """When LLM returns deferred_source_discovery=True, empty source_targets is accepted."""
+        mock_response = json.dumps({
+            "market_id": "mk_deferred_test",
+            "question": "Will the UN pass a climate resolution this week?",
+            "event_definition": "UN General Assembly passes climate resolution",
+            "target_entity": "United Nations",
+            "predicate": "passes climate resolution",
+            "resolution_window": {
+                "start": "2026-02-01T00:00:00Z",
+                "end": "2026-02-08T00:00:00Z",
+            },
+            "resolution_deadline": "2026-02-09T00:00:00Z",
+            "data_requirements": [{
+                "requirement_id": "req_001",
+                "description": "Check UN news for climate resolution vote results",
+                "deferred_source_discovery": True,
+                "source_targets": [],
+                "selection_policy": {
+                    "strategy": "single_best",
+                    "min_sources": 1,
+                    "max_sources": 3,
+                    "quorum": 1,
+                },
+            }],
+            "resolution_rules": [
+                {"rule_id": "R_VALIDITY", "description": "Check validity", "priority": 100},
+                {"rule_id": "R_BINARY_DECISION", "description": "Map to YES/NO", "priority": 80},
+                {"rule_id": "R_INVALID_FALLBACK", "description": "Fallback", "priority": 0},
+            ],
+            "allowed_sources": [],
+        })
+
+        ctx = AgentContext.create_mock(llm_responses=[mock_response])
+        agent = PromptEngineerLLM()
+        result = agent.run(ctx, "Will the UN pass a climate resolution? Check the news.")
+
+        assert result.success
+        prompt_spec, tool_plan = result.output
+        assert len(prompt_spec.data_requirements) == 1
+        req = prompt_spec.data_requirements[0]
+        assert req.deferred_source_discovery is True
+        assert req.source_targets == []
+        assert "req_001" in tool_plan.requirements
+
+    def test_data_requirement_deferred_allows_empty_sources(self):
+        """DataRequirement with deferred_source_discovery=True accepts empty source_targets."""
+        req = DataRequirement(
+            requirement_id="req_test",
+            description="Test",
+            source_targets=[],
+            selection_policy=SelectionPolicy(strategy="single_best"),
+            deferred_source_discovery=True,
+        )
+        assert req.deferred_source_discovery is True
+        assert req.source_targets == []
+
+    def test_data_requirement_non_deferred_rejects_empty_sources(self):
+        """DataRequirement with deferred_source_discovery=False rejects empty source_targets."""
+        with pytest.raises(ValidationError):
+            DataRequirement(
+                requirement_id="req_test",
+                description="Test",
+                source_targets=[],
+                selection_policy=SelectionPolicy(strategy="single_best"),
+                deferred_source_discovery=False,
+            )
 
 
 if __name__ == "__main__":

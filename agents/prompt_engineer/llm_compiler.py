@@ -238,6 +238,9 @@ class LLMPromptCompiler:
         reqs_data = data.get("data_requirements", [])
         data_requirements = []
         for i, req_data in enumerate(reqs_data):
+            # Check if this requirement uses deferred source discovery
+            deferred = req_data.get("deferred_source_discovery", False)
+
             # Build source targets
             targets_data = req_data.get("source_targets", [])
             source_targets = [
@@ -254,11 +257,11 @@ class LLMPromptCompiler:
                 for t in targets_data
                 if t.get("uri")  # Only include targets with URIs
             ]
-            
-            # Must have at least one source target
-            if not source_targets:
+
+            # Skip requirements with no sources UNLESS deferred
+            if not source_targets and not deferred:
                 continue
-            
+
             # Build selection policy
             sel_data = req_data.get("selection_policy", {})
             selection_policy = SelectionPolicy(
@@ -267,7 +270,7 @@ class LLMPromptCompiler:
                 max_sources=sel_data.get("max_sources", 3),
                 quorum=sel_data.get("quorum", 1),
             )
-            
+
             data_requirements.append(
                 DataRequirement(
                     requirement_id=req_data.get("requirement_id", f"req_{i:03d}"),
@@ -276,6 +279,7 @@ class LLMPromptCompiler:
                     selection_policy=selection_policy,
                     min_provenance_tier=req_data.get("min_provenance_tier", 0),
                     expected_fields=req_data.get("expected_fields"),
+                    deferred_source_discovery=deferred,
                 )
             )
         
