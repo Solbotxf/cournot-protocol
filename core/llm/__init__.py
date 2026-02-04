@@ -19,6 +19,7 @@ from .providers import (
     OpenAIProvider,
     AnthropicProvider,
     GoogleProvider,
+    GrokProvider,
     MockProvider,
     create_provider,
 )
@@ -83,6 +84,7 @@ __all__ = [
     "OpenAIProvider",
     "AnthropicProvider",
     "GoogleProvider",
+    "GrokProvider",
     "MockProvider",
     "create_provider",
     "create_llm_client"

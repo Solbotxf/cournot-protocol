@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 @dataclass
 class LLMConfig:
@@ -175,7 +179,10 @@ class RuntimeConfig:
         if agents_data:
             for agent_key, agent_conf in agents_data.items():
                 if hasattr(agents, agent_key) and isinstance(agent_conf, dict):
-                    setattr(agents, agent_key, AgentConfig(**agent_conf))
+                    conf = dict(agent_conf)
+                    if isinstance(conf.get("llm_override"), dict):
+                        conf["llm_override"] = LLMConfig(**conf["llm_override"])
+                    setattr(agents, agent_key, AgentConfig(**conf))
         
         return cls(
             llm=llm,

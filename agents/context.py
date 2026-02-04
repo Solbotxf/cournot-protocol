@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from core.http import HttpClient
     from core.receipts import ReceiptRecorder
     from core.config import RuntimeConfig
+    from core.config.runtime import LLMConfig
 
 
 class Clock(Protocol):
@@ -323,3 +324,30 @@ class AgentContext:
         if self.recorder:
             return self.recorder.get_receipt_refs()
         return []
+
+    def with_llm_override(self, llm_config: "LLMConfig") -> "AgentContext":
+        """Return a shallow copy with a different LLM client.
+
+        All other fields (recorder, http, clock, cache) are shared.
+        """
+        import copy
+        from core.llm import LLMClient, create_provider
+        from core.llm.determinism import DecodingPolicy
+
+        provider = create_provider(
+            llm_config.provider,
+            model=llm_config.model,
+            api_key=llm_config.api_key,
+            base_url=llm_config.base_url,
+        )
+        llm = LLMClient(
+            provider,
+            default_policy=DecodingPolicy(
+                temperature=llm_config.temperature,
+                max_tokens=llm_config.max_tokens,
+            ),
+            recorder=self.recorder,
+        )
+        ctx = copy.copy(self)
+        ctx.llm = llm
+        return ctx
