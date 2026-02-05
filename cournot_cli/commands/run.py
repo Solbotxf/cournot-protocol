@@ -59,12 +59,14 @@ class RunSummary:
 
 
 def _runtime_config_from_cli(config: CLIConfig):
-    """Build RuntimeConfig from CLIConfig for agent context (serper, etc.)."""
+    """Build RuntimeConfig from CLIConfig for agent context (serper, proxy, etc.)."""
     from core.config import RuntimeConfig, SerperConfig
     runtime = RuntimeConfig.from_env()
     runtime.serper = SerperConfig(
         api_key=config.serper.api_key or None,
     )
+    if config.proxy:
+        runtime.proxy = config.proxy
     return runtime
 
 
@@ -104,6 +106,7 @@ def create_agent_context(config: CLIConfig):
                 api_key=config.llm.api_key,
                 model=config.llm.model,
                 endpoint=config.llm.endpoint or None,
+                proxy=config.proxy or None,
             )
             ctx = AgentContext(
                 llm=llm,
@@ -121,7 +124,9 @@ def create_agent_context(config: CLIConfig):
     if config.require_network or config.execution_mode == "production":
         try:
             from core.http import HttpClient
-            http = HttpClient()
+            http = HttpClient(
+                proxy=ctx.config.proxy if ctx.config else None,
+            )
             ctx = AgentContext(
                 llm=ctx.llm,
                 http=http,

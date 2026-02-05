@@ -82,18 +82,21 @@ class HttpClient:
         timeout: float = 30.0,
         recorder: Optional["ReceiptRecorder"] = None,
         default_headers: Optional[dict[str, str]] = None,
+        proxy: Optional[str] = None,
     ) -> None:
         """
         Initialize HTTP client.
-        
+
         Args:
             timeout: Default request timeout in seconds
             recorder: Receipt recorder for audit logging
             default_headers: Headers to include in all requests
+            proxy: Proxy URL (e.g., "http://user:pass@host:port")
         """
         self.timeout = timeout
         self.recorder = recorder
         self.default_headers = default_headers or {}
+        self.proxy = proxy
         self._session = None
     
     def _get_session(self):
@@ -105,6 +108,11 @@ class HttpClient:
                 raise ImportError("requests package required: pip install requests")
             self._session = requests.Session()
             self._session.headers.update(self.default_headers)
+            if self.proxy:
+                self._session.proxies = {
+                    "http": self.proxy,
+                    "https": self.proxy,
+                }
         return self._session
     
     def request(

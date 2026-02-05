@@ -47,40 +47,43 @@ class LLMConfig:
 @dataclass
 class CLIConfig:
     """Main CLI configuration."""
-    
+
     # Pipeline settings
     strict_mode: bool = True
     enable_sentinel: bool = True
     enable_replay: bool = False
-    
+
     # Execution mode: "production", "development", "test"
     execution_mode: str = "development"
-    
+
     # Capability requirements
     require_llm: bool = False
     require_network: bool = False
-    
+
     # Timeouts
     pipeline_timeout: int = 300
     replay_timeout: int = 30
-    
+
     # Audit evidence context limits (to stay under model context, e.g. 128K tokens)
     max_audit_evidence_chars: int = 300_000
     max_audit_evidence_items: int = 100
-    
+
     # Collector settings
     collector: CollectorConfig = field(default_factory=CollectorConfig)
 
     # Serper API (for search operations in Collector)
     serper: SerperConfig = field(default_factory=SerperConfig)
-    
+
     # LLM settings
     llm: LLMConfig = field(default_factory=LLMConfig)
-    
+
+    # Proxy settings (e.g., "http://user:pass@host:port")
+    proxy: str = ""
+
     # Logging
     log_level: str = "INFO"
     log_file: str | None = None
-    
+
     # Output
     default_output_format: str = "human"  # "human" or "json"
 
@@ -135,10 +138,14 @@ def load_config_from_env() -> CLIConfig:
     if os.getenv(f"{ENV_PREFIX}LLM_ENDPOINT"):
         config.llm.endpoint = os.getenv(f"{ENV_PREFIX}LLM_ENDPOINT", "")
     
+    # Proxy (use COURNOT_HTTP_PROXY for consistency with RuntimeConfig)
+    if os.getenv(f"{ENV_PREFIX}HTTP_PROXY"):
+        config.proxy = os.getenv(f"{ENV_PREFIX}HTTP_PROXY", "")
+
     # Logging
     config.log_level = os.getenv(f"{ENV_PREFIX}LOG_LEVEL", "INFO")
     config.log_file = os.getenv(f"{ENV_PREFIX}LOG_FILE")
-    
+
     return config
 
 
@@ -194,10 +201,13 @@ def load_config_from_file(path: Path) -> CLIConfig:
         max_tokens=llm_data.get("max_tokens", 4096),
     )
     
+    # Proxy
+    config.proxy = data.get("proxy", config.proxy)
+
     # Logging
     config.log_level = data.get("log_level", config.log_level)
     config.log_file = data.get("log_file", config.log_file)
-    
+
     return config
 
 

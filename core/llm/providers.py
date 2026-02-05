@@ -60,30 +60,32 @@ class LLMProvider(ABC):
 class OpenAIProvider(LLMProvider):
     """
     OpenAI API provider.
-    
+
     Requires: openai package
     """
-    
+
     def __init__(
         self,
         model: str = "gpt-4o",
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        proxy: Optional[str] = None,
     ) -> None:
         self._model = model
         self._api_key = api_key or os.getenv("OPENAI_API_KEY")
         self._base_url = base_url
+        self._proxy = proxy
         self._client = None
-    
+
     @property
     def name(self) -> str:
         return "openai"
-    
+
     @property
     def model(self) -> str:
         return self._model
-    
+
     def _get_client(self):
         """Lazy-load OpenAI client."""
         if self._client is None:
@@ -91,11 +93,22 @@ class OpenAIProvider(LLMProvider):
                 from openai import OpenAI
             except ImportError:
                 raise ImportError("openai package required: pip install openai")
-            
-            self._client = OpenAI(
-                api_key=self._api_key,
-                base_url=self._base_url,
-            )
+
+            kwargs: dict[str, Any] = {
+                "api_key": self._api_key,
+            }
+            if self._base_url:
+                kwargs["base_url"] = self._base_url
+
+            # Configure proxy via httpx client
+            if self._proxy:
+                try:
+                    import httpx
+                    kwargs["http_client"] = httpx.Client(proxy=self._proxy)
+                except ImportError:
+                    pass  # httpx not available, proxy won't work
+
+            self._client = OpenAI(**kwargs)
         return self._client
     
     def chat(
@@ -132,28 +145,30 @@ class OpenAIProvider(LLMProvider):
 class AnthropicProvider(LLMProvider):
     """
     Anthropic API provider.
-    
+
     Requires: anthropic package
     """
-    
+
     def __init__(
         self,
         model: str = "claude-sonnet-4-20250514",
         *,
         api_key: Optional[str] = None,
+        proxy: Optional[str] = None,
     ) -> None:
         self._model = model
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+        self._proxy = proxy
         self._client = None
-    
+
     @property
     def name(self) -> str:
         return "anthropic"
-    
+
     @property
     def model(self) -> str:
         return self._model
-    
+
     def _get_client(self):
         """Lazy-load Anthropic client."""
         if self._client is None:
@@ -161,8 +176,18 @@ class AnthropicProvider(LLMProvider):
                 from anthropic import Anthropic
             except ImportError:
                 raise ImportError("anthropic package required: pip install anthropic")
-            
-            self._client = Anthropic(api_key=self._api_key)
+
+            kwargs: dict[str, Any] = {"api_key": self._api_key}
+
+            # Configure proxy via httpx client
+            if self._proxy:
+                try:
+                    import httpx
+                    kwargs["http_client"] = httpx.Client(proxy=self._proxy)
+                except ImportError:
+                    pass  # httpx not available, proxy won't work
+
+            self._client = Anthropic(**kwargs)
         return self._client
     
     def chat(
@@ -299,11 +324,13 @@ class GrokProvider(OpenAIProvider):
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        proxy: Optional[str] = None,
     ) -> None:
         super().__init__(
             model=model,
             api_key=api_key or os.getenv("XAI_API_KEY"),
             base_url=base_url or "https://api.x.ai/v1",
+            proxy=proxy,
         )
 
     @property
@@ -391,29 +418,31 @@ class MockProvider(LLMProvider):
 def create_provider(
     provider_name: str,
     model: Optional[str] = None,
+    proxy: Optional[str] = None,
     **kwargs: Any,
 ) -> LLMProvider:
     """
     Factory function to create an LLM provider.
-    
+
     Args:
-        provider_name: Provider name (openai, anthropic, google, mock)
+        provider_name: Provider name (openai, anthropic, google, grok, mock)
         model: Model identifier (optional, uses provider default)
+        proxy: Proxy URL (e.g., "http://user:pass@host:port")
         **kwargs: Provider-specific arguments
-    
+
     Returns:
         LLMProvider instance
     """
     provider_name = provider_name.lower()
-    
+
     if provider_name == "openai":
-        return OpenAIProvider(model=model or "gpt-4o", **kwargs)
+        return OpenAIProvider(model=model or "gpt-4o", proxy=proxy, **kwargs)
     elif provider_name == "anthropic":
-        return AnthropicProvider(model=model or "claude-sonnet-4-20250514", **kwargs)
+        return AnthropicProvider(model=model or "claude-sonnet-4-20250514", proxy=proxy, **kwargs)
     elif provider_name == "google":
         return GoogleProvider(model=model or "gemini-1.5-pro", **kwargs)
     elif provider_name == "grok":
-        return GrokProvider(model=model or "grok-4-latest", **kwargs)
+        return GrokProvider(model=model or "grok-4-latest", proxy=proxy, **kwargs)
     elif provider_name == "mock":
         return MockProvider(model=model or "mock-model", **kwargs)
     else:

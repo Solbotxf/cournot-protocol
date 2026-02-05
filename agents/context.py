@@ -192,6 +192,7 @@ class AgentContext:
                 model=config.llm.model,
                 api_key=config.llm.api_key,
                 base_url=config.llm.base_url,
+                proxy=config.proxy,
             )
             llm = LLMClient(
                 provider,
@@ -213,6 +214,7 @@ class AgentContext:
             timeout=config.http.timeout,
             recorder=recorder,
             default_headers=default_headers,
+            proxy=config.proxy,
         )
         
         # Choose clock
@@ -334,11 +336,13 @@ class AgentContext:
         from core.llm import LLMClient, create_provider
         from core.llm.determinism import DecodingPolicy
 
+        proxy = self.config.proxy if self.config else None
         provider = create_provider(
             llm_config.provider,
             model=llm_config.model,
             api_key=llm_config.api_key,
             base_url=llm_config.base_url,
+            proxy=proxy,
         )
         llm = LLMClient(
             provider,

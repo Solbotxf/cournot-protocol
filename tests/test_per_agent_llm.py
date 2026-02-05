@@ -97,6 +97,7 @@ class TestWithLLMOverride:
             model="claude-sonnet-4-20250514",
             api_key="test-key",
             base_url=None,
+            proxy=None,
         )
 
     @patch("core.llm.create_provider")

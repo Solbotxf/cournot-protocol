@@ -7,3 +7,5 @@ __pycache__/
 .idea
 *.log
 tmp
+fetch_pages.sh
+polymarket_closed_events/

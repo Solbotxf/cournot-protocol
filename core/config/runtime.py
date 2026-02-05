@@ -103,7 +103,7 @@ class PipelineConfig:
 class RuntimeConfig:
     """
     Complete runtime configuration for the Cournot protocol.
-    
+
     Can be loaded from:
     - Environment variables
     - YAML file
@@ -114,35 +114,65 @@ class RuntimeConfig:
     agents: AgentsConfig = field(default_factory=AgentsConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     serper: SerperConfig = field(default_factory=SerperConfig)
+    proxy: Optional[str] = None  # e.g., "http://user:pass@host:port"
     extra: dict[str, Any] = field(default_factory=dict)
     
+    @staticmethod
+    def _get_env_overrides() -> dict[str, Any]:
+        """
+        Get configuration overrides from environment variables.
+
+        This is the SINGLE source of truth for all env var reading.
+
+        Supported variables:
+        - COURNOT_LLM_PROVIDER: LLM provider name
+        - COURNOT_LLM_MODEL: LLM model name
+        - COURNOT_LLM_API_KEY: LLM API key (also checks {PROVIDER}_API_KEY)
+        - COURNOT_STRICT_MODE: Enable strict mode (true/false)
+        - COURNOT_DEBUG: Enable debug mode (true/false)
+        - COURNOT_HTTP_PROXY: HTTP proxy URL
+        - SERPER_API_KEY: Serper API key for search
+        """
+        overrides: dict[str, Any] = {}
+
+        # LLM settings
+        if os.getenv("COURNOT_LLM_PROVIDER"):
+            overrides.setdefault("llm", {})["provider"] = os.getenv("COURNOT_LLM_PROVIDER")
+        if os.getenv("COURNOT_LLM_MODEL"):
+            overrides.setdefault("llm", {})["model"] = os.getenv("COURNOT_LLM_MODEL")
+        if os.getenv("COURNOT_LLM_API_KEY"):
+            overrides.setdefault("llm", {})["api_key"] = os.getenv("COURNOT_LLM_API_KEY")
+
+        # Pipeline settings
+        if os.getenv("COURNOT_STRICT_MODE"):
+            overrides.setdefault("pipeline", {})["strict_mode"] = (
+                os.getenv("COURNOT_STRICT_MODE", "true").lower() == "true"
+            )
+        if os.getenv("COURNOT_DEBUG"):
+            overrides.setdefault("pipeline", {})["debug"] = (
+                os.getenv("COURNOT_DEBUG", "false").lower() == "true"
+            )
+
+        # Serper API
+        if os.getenv("SERPER_API_KEY"):
+            overrides.setdefault("serper", {})["api_key"] = os.getenv("SERPER_API_KEY")
+
+        # Proxy
+        if os.getenv("COURNOT_HTTP_PROXY"):
+            overrides["proxy"] = os.getenv("COURNOT_HTTP_PROXY")
+
+        return overrides
+
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
         """
-        Load configuration from environment variables.
-        
-        Supported variables:
-        - COURNOT_LLM_PROVIDER
-        - COURNOT_LLM_MODEL
-        - COURNOT_STRICT_MODE
-        - COURNOT_DEBUG
-        - SERPER_API_KEY
-        """
-        llm = LLMConfig(
-            provider=os.getenv("COURNOT_LLM_PROVIDER", "openai"),
-            model=os.getenv("COURNOT_LLM_MODEL", "gpt-4o"),
-        )
-        
-        pipeline = PipelineConfig(
-            strict_mode=os.getenv("COURNOT_STRICT_MODE", "true").lower() == "true",
-            debug=os.getenv("COURNOT_DEBUG", "false").lower() == "true",
-        )
+        Load configuration purely from environment variables.
 
-        serper = SerperConfig(
-            api_key=os.getenv("SERPER_API_KEY") or None,
-        )
-        
-        return cls(llm=llm, pipeline=pipeline, serper=serper)
+        Uses defaults for any values not specified in env vars.
+        """
+        overrides = cls._get_env_overrides()
+        # Start with defaults and apply env overrides
+        return cls.from_dict(overrides)
     
     @classmethod
     def from_yaml(cls, path: str | Path) -> "RuntimeConfig":
@@ -159,7 +189,7 @@ class RuntimeConfig:
     
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RuntimeConfig":
-        """Load configuration from a dictionary."""
+        """Load configuration from a dictionary (supports partial data)."""
         llm_data = data.get("llm", {})
         http_data = data.get("http", {})
         agents_data = data.get("agents", {})
@@ -169,11 +199,11 @@ class RuntimeConfig:
             serper = SerperConfig(api_key=serper_data.get("api_key"))
         else:
             serper = SerperConfig()
-        
+
         llm = LLMConfig(**llm_data) if llm_data else LLMConfig()
         http = HttpConfig(**http_data) if http_data else HttpConfig()
         pipeline = PipelineConfig(**pipeline_data) if pipeline_data else PipelineConfig()
-        
+
         # Parse agents config
         agents = AgentsConfig()
         if agents_data:
@@ -183,15 +213,51 @@ class RuntimeConfig:
                     if isinstance(conf.get("llm_override"), dict):
                         conf["llm_override"] = LLMConfig(**conf["llm_override"])
                     setattr(agents, agent_key, AgentConfig(**conf))
-        
+
         return cls(
             llm=llm,
             http=http,
             agents=agents,
             pipeline=pipeline,
             serper=serper,
+            proxy=data.get("proxy"),
             extra=data.get("extra", {}),
         )
+
+    def with_env_overrides(self) -> "RuntimeConfig":
+        """
+        Return a new config with environment variable overrides applied.
+
+        This allows loading from a config file first, then overlaying env vars.
+        """
+        overrides = self._get_env_overrides()
+        if not overrides:
+            return self
+
+        # Apply overrides to current config
+        import copy
+        new_config = copy.deepcopy(self)
+
+        # LLM overrides
+        if "llm" in overrides:
+            for key, value in overrides["llm"].items():
+                setattr(new_config.llm, key, value)
+
+        # Pipeline overrides
+        if "pipeline" in overrides:
+            for key, value in overrides["pipeline"].items():
+                setattr(new_config.pipeline, key, value)
+
+        # Serper overrides
+        if "serper" in overrides:
+            for key, value in overrides["serper"].items():
+                setattr(new_config.serper, key, value)
+
+        # Proxy override
+        if "proxy" in overrides:
+            new_config.proxy = overrides["proxy"]
+
+        return new_config
     
     def to_dict(self) -> dict[str, Any]:
         """Convert configuration to a dictionary."""

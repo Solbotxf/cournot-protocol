@@ -20,16 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 def _load_runtime_config() -> RuntimeConfig:
-    """Load RuntimeConfig from cournot.json, falling back to env vars.
+    """Load RuntimeConfig from config file, then overlay environment variables.
 
     Search order for config file:
       1. ./cournot.json
       2. ./.cournot.json
       3. ~/.config/cournot/config.json
 
-    The .env file is already loaded by core.config.runtime on import,
-    so standard provider env vars (OPENAI_API_KEY, XAI_API_KEY, etc.)
-    are available to LLMConfig.__post_init__.
+    Environment variables ALWAYS override config file values.
+    The .env file is loaded automatically by core.config.runtime on import.
     """
     search_paths = [
         Path.cwd() / "cournot.json",
@@ -37,18 +36,25 @@ def _load_runtime_config() -> RuntimeConfig:
         Path.home() / ".config" / "cournot" / "config.json",
     ]
 
+    config: RuntimeConfig | None = None
+
     for path in search_paths:
         if path.exists():
             try:
                 with open(path) as f:
                     data = json.load(f)
                 logger.info(f"Loaded config from {path}")
-                return RuntimeConfig.from_dict(data)
+                config = RuntimeConfig.from_dict(data)
+                break
             except Exception as e:
                 logger.warning(f"Failed to parse {path}: {e}")
 
-    # No config file found — build from env vars alone
-    return RuntimeConfig.from_env()
+    if config is None:
+        # No config file found — start with defaults
+        config = RuntimeConfig()
+
+    # Always apply environment variable overrides
+    return config.with_env_overrides()
 
 
 def get_agent_context(

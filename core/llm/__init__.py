@@ -30,25 +30,27 @@ def create_llm_client(
     api_key: Optional[str] = None,
     model: Optional[str] = None,
     endpoint: Optional[str] = None,
+    proxy: Optional[str] = None,
     default_policy: Optional[DecodingPolicy] = None,
     recorder: Optional[Any] = None,
     **kwargs: Any,
 ) -> LLMClient:
     """
     Convenience function to create an LLMClient.
-    
+
     Args:
-        provider: Provider name (openai, anthropic, google, mock)
+        provider: Provider name (openai, anthropic, google, grok, mock)
         api_key: API key for the provider
         model: Model identifier (optional, uses provider default)
         endpoint: Custom API endpoint (for OpenAI-compatible APIs)
+        proxy: Proxy URL (e.g., "http://user:pass@host:port")
         default_policy: Default decoding policy
         recorder: Receipt recorder for audit logging
         **kwargs: Additional provider-specific arguments
-    
+
     Returns:
         Configured LLMClient instance
-    
+
     Example:
         client = create_llm_client(
             provider="anthropic",
@@ -64,9 +66,9 @@ def create_llm_client(
     if endpoint:
         provider_kwargs["base_url"] = endpoint
     provider_kwargs.update(kwargs)
-    
+
     # Create provider
-    llm_provider = create_provider(provider, model=model, **provider_kwargs)
+    llm_provider = create_provider(provider, model=model, proxy=proxy, **provider_kwargs)
     
     # Create client
     return LLMClient(
