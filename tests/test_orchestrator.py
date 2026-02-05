@@ -115,16 +115,20 @@ class TestPipelineState:
     def test_add_check(self):
         """Test adding checks."""
         from core.schemas import CheckResult
-        
+
         state = PipelineState()
-        
+
         # Add passing check
         state.add_check(CheckResult.passed("test1", "Passed"))
         assert state.ok
-        
-        # Add failing check
+        assert len(state.errors) == 0
+
+        # Add failing check - should NOT set ok=False (checks are informational)
+        # but should add message to errors for visibility
         state.add_check(CheckResult.failed("test2", "Failed"))
-        assert not state.ok
+        assert state.ok  # Check failures don't block execution
+        assert len(state.errors) == 1
+        assert "test2" in state.errors[0]
 
 
 class TestPipelineAgentSelection:

@@ -72,13 +72,19 @@ class PipelineState:
     # Aggregated results
     checks: list[CheckResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    ok: bool = True
-    
+    ok: bool = True  # True until a fatal error occurs (not check failures)
+
     def add_check(self, check: CheckResult) -> None:
-        """Add a check result to the aggregated checks."""
+        """Add a check result to the aggregated checks.
+
+        Note: Failed checks are recorded but do NOT block pipeline execution.
+        Only explicit errors (via add_error) block execution.
+        Check failures are informational and visible in errors for debugging.
+        """
         self.checks.append(check)
+        # Record failed checks in errors for visibility, but don't block execution
         if not check.ok and check.severity == "error":
-            self.ok = False
+            self.errors.append(f"Check [{check.check_id}]: {check.message}")
     
     def add_checks(self, checks: list[CheckResult]) -> None:
         """Add multiple check results."""
@@ -91,12 +97,15 @@ class PipelineState:
         self.ok = False
     
     def merge_verification(self, result: VerificationResult) -> None:
-        """Merge a verification result into the state."""
+        """Merge a verification result into the state.
+
+        Adds checks (informational) and errors (fatal) from the verification.
+        Check failures don't block execution - only explicit errors do.
+        """
         self.add_checks(result.checks)
-        if not result.ok:
-            self.ok = False
-            if result.error:
-                self.add_error(result.error.message)
+        # Only block on explicit errors, not check failures
+        if result.error:
+            self.add_error(result.error.message)
 
 
 class SOPStep(Protocol):
