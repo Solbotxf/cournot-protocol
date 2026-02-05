@@ -105,12 +105,13 @@ def test_mock_provider():
 def test_runtime_config():
     """Test runtime configuration."""
     from core.config import RuntimeConfig
-    
+
     config = RuntimeConfig()
-    
+
     assert config.llm.provider == "openai"
-    assert config.pipeline.strict_mode == True
-    assert config.pipeline.deterministic_timestamps == True
+    # Defaults changed: strict_mode=False for easier dev, deterministic_timestamps=False for real clock
+    assert config.pipeline.strict_mode == False
+    assert config.pipeline.deterministic_timestamps == False
     
     # Test from dict
     config = RuntimeConfig.from_dict({

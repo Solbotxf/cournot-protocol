@@ -109,6 +109,9 @@ USER_PROMPT_TEMPLATE = """Analyze the following evidence and generate a reasonin
 ## Event Definition
 {event_definition}
 
+## Critical Assumptions (Must Follow)
+{assumptions}
+
 ## Resolution Rules
 {resolution_rules}
 

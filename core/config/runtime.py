@@ -90,11 +90,11 @@ class AgentsConfig:
 @dataclass
 class PipelineConfig:
     """Configuration for pipeline execution."""
-    strict_mode: bool = True
+    strict_mode: bool = False
     enable_replay: bool = False
     enable_sentinel_verify: bool = True
     max_runtime_s: int = 300
-    deterministic_timestamps: bool = True
+    deterministic_timestamps: bool = False
     debug: bool = False
     record_receipts: bool = True
 

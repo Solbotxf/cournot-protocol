@@ -104,9 +104,14 @@ class LLMReasoner:
         else:
             possible_outcomes_text = "Binary market. Allowed outcomes: YES, NO"
 
+        # Format assumptions from prompt_spec.extra
+        assumptions_list = prompt_spec.extra.get("assumptions", [])
+        assumptions_text = "\n".join([f"- {a}" for a in assumptions_list]) if assumptions_list else "None"
+
         user_prompt = USER_PROMPT_TEMPLATE.format(
             question=prompt_spec.market.question,
             event_definition=prompt_spec.market.event_definition,
+            assumptions=assumptions_text,
             resolution_rules=rules_text,
             evidence_json=evidence_json,
             target_entity=semantics.target_entity,
@@ -129,6 +134,7 @@ class LLMReasoner:
             user_prompt = USER_PROMPT_TEMPLATE.format(
                 question=prompt_spec.market.question,
                 event_definition=prompt_spec.market.event_definition,
+                assumptions=assumptions_text,
                 resolution_rules=rules_text,
                 evidence_json=evidence_json,
                 target_entity=semantics.target_entity,
