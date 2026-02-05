@@ -177,10 +177,15 @@ class JudgeLLM(BaseAgent):
         else:
             possible_outcomes_text = "Binary market. Allowed outcomes: YES, NO"
 
+        # Format assumptions from prompt_spec.extra
+        assumptions_list = prompt_spec.extra.get("assumptions", [])
+        assumptions_text = "\n".join([f"- {a}" for a in assumptions_list]) if assumptions_list else "None"
+
         # Build prompt
         user_prompt = USER_PROMPT_TEMPLATE.format(
             question=prompt_spec.market.question,
             event_definition=prompt_spec.market.event_definition,
+            assumptions=assumptions_text,
             preliminary_outcome=trace.preliminary_outcome or "UNCERTAIN",
             preliminary_confidence=trace.preliminary_confidence or 0.5,
             recommended_rule=trace.recommended_rule_id or "None",

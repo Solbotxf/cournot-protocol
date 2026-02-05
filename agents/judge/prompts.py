@@ -76,6 +76,9 @@ USER_PROMPT_TEMPLATE = """Review the following reasoning trace and finalize the 
 ## Event Definition
 {event_definition}
 
+## Critical Assumptions (Must Follow)
+{assumptions}
+
 ## Auditor's Preliminary Verdict
 - Outcome: {preliminary_outcome}
 - Confidence: {preliminary_confidence:.2f}

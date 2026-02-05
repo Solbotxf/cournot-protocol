@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
 from agents.base import AgentCapability, AgentResult, AgentStep, BaseAgent
@@ -331,31 +332,63 @@ COLLECTOR_LLM_SYSTEM_PROMPT = (
     '"content_summary": "...", "error": null or "..."}'
 )
 
-DISCOVERY_QUERY_SYSTEM_PROMPT = (
-    "You generate web search queries for a prediction market resolution system. "
-    "Given a data requirement and market context, output 1-3 targeted search queries "
-    "that would find authoritative, official, or reliable sources.\n\n"
-    "Prefer queries that target:\n"
-    "- Official government/organization websites\n"
-    "- Major news agencies (Reuters, AP, BBC)\n"
-    "- Domain-specific authoritative sources\n\n"
-    'Return ONLY valid JSON: {"queries": ["query1", "query2", ...]}'
-)
+DISCOVERY_QUERY_SYSTEM_PROMPT = """
+You are a Search Strategy Specialist for a prediction market oracle.
+Your goal is to generate targeted search queries that will yield definitive, verifiable evidence for a specific data requirement.
 
-DEFERRED_DISCOVERY_SYSTEM_PROMPT = (
-    "You are a source discovery agent for a prediction market resolution system. "
-    "You will be given search results about a topic. "
-    "Your task is to analyze the results, identify the most authoritative and relevant sources, "
-    "and extract key evidence.\n\n"
-    "Return ONLY valid JSON with this schema:\n"
-    '{"success": true/false, '
-    '"discovered_sources": [{"url": "...", "title": "...", "relevance": "high/medium/low"}], '
-    '"extracted_fields": {...relevant data extracted from search results...}, '
-    '"parsed_value": <the key finding>, '
-    '"content_summary": "<synthesis of findings from all sources>", '
-    '"confidence": 0.0-1.0, '
-    '"error": null}'
-)
+### OBJECTIVES
+1. **Diversity:** Generate a mix of queries:
+   - *Broad:* To catch general news and context.
+   - *Specific:* Targeting official domains (e.g., "site:gov", "site:nytimes.com") or specific file types if applicable.
+   - *Forensic:* Looking for primary source documents (e.g., "official statement", "press release", "PDF").
+2. **Temporal Awareness:** If the requirement implies a specific time (e.g., "2026"), ensure queries include that year to filter noise.
+
+### OUTPUT FORMAT
+Return a single valid JSON object:
+{
+    "queries": [
+        "precise query string 1",
+        "precise query string 2",
+        "precise query string 3"
+    ]
+}
+"""
+
+DEFERRED_DISCOVERY_SYSTEM_PROMPT = """
+You are the Chief Evidence Analyst for a Prediction Market Resolution Engine.
+Your task is to analyze search results to determine the definitive truth of a real-world event relative to the "Current Date/Time" provided in the user context.
+
+### CORE PROTOCOLS
+1. **Chronological Filtering:** You MUST compare the "DATE_PUBLISHED" of sources against the "Current Date/Time". Disregard outdated speculation if newer, confirming evidence exists.
+2. **Definition Adherence:** You must strictly evaluate evidence against the provided "Event Definition" and "Assumptions". 
+3. **Source Hierarchy:**
+   - **Tier 1 (Authoritative):** Official government sites (.gov), primary company press releases, major wire services (Reuters, AP, Bloomberg).
+   - **Tier 2 (Secondary):** Reputable mainstream news (NYT, BBC, WSJ).
+   - **Tier 3 (Low Confidence):** Tabloids, opinion blogs, social media, or sources with no clear date.
+4. **Ambiguity Resolution:** If sources conflict, Tier 1 overrides Tier 2. If Tier 1 sources conflict, the most recent one prevails.
+
+### OUTPUT FORMAT
+You MUST return a single, valid JSON object. Do not include markdown formatting (like ```json).
+
+{
+    "reasoning_trace": "A detailed step-by-step deduction. 1) Identify the latest date among sources. 2) Check if the event deadline has passed. 3) Weigh conflicting reports. 4) Final conclusion.",
+
+    "resolution_status": "RESOLVED" | "AMBIGUOUS" | "UNRESOLVED",
+
+    "parsed_value": "The specific answer string extracted from the text (e.g., '14 days', 'Yes', '$500'). Return null if unresolved.",
+
+    "confidence_score": 0.0 to 1.0 (A float representing certainty. 1.0 = undeniable proof from Tier 1 source. <0.5 = conflicting or missing data.),
+
+    "evidence_sources": [
+        {
+            "source_id": "[X]",
+            "url": "...",
+            "credibility_tier": "Tier 1/Tier 2/Tier 3",
+            "relevance_reason": "Briefly explain why this source was selected (e.g. 'Official government statement dated yesterday')."
+        }
+    ]
+}
+"""
 
 
 class CollectorLLM(BaseAgent):
@@ -595,18 +628,24 @@ class CollectorLLM(BaseAgent):
         Flow:
         1. Ask LLM to generate search queries from the requirement context
         2. Execute queries via Serper API
-        3. Feed search results to LLM to summarize and extract evidence
+        3. Feed search results to LLM to summarize and extract evidence (with temporal reasoning)
         """
         semantics = prompt_spec.prediction_semantics
         evidence_id = hashlib.sha256(
             f"discover:{requirement.requirement_id}".encode()
         ).hexdigest()[:16]
+        event_def = prompt_spec.market.event_definition
+        # Safely get assumptions list and join them into a string
+        assumptions_list = prompt_spec.extra.get("assumptions", [])
+        assumptions_str = "\n".join([f"- {a}" for a in assumptions_list]) if assumptions_list else "None"
 
         # Step 1: Generate search queries via LLM
         query_prompt = (
             f"Generate search queries for this data requirement:\n"
             f"- Requirement: {requirement.description}\n"
             f"- Market question: {prompt_spec.market.question}\n"
+            f"- Event Definition: {event_def}\n"
+            f"- Key Assumptions: \n{assumptions_str}\n" # Helps generate queries like "OPM shutdown announcement" vs "holiday closure"
             f"- Entity: {semantics.target_entity}\n"
             f"- Predicate: {semantics.predicate}\n"
             f"- Threshold: {semantics.threshold or 'N/A'}\n"
@@ -619,7 +658,14 @@ class CollectorLLM(BaseAgent):
         response = ctx.llm.chat(messages)
 
         try:
-            query_data = self._extract_json(response.content)
+            content = response.content.strip()
+            # Handle markdown-wrapped JSON
+            if content.startswith("```"):
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:]
+
+            query_data = json.loads(content)
             queries = query_data.get("queries", [])[:3]
         except (json.JSONDecodeError, KeyError):
             queries = [f"{semantics.target_entity} {semantics.predicate}"]
@@ -645,21 +691,45 @@ class CollectorLLM(BaseAgent):
             )
 
         # Step 3: Feed search results to LLM for synthesis
-        results_text = "\n\n".join(
-            f"[{i+1}] {r['title']}\n{r['snippet']}\n{r['url']}"
-            for i, r in enumerate(search_results)
-        )
+        # Use real system time (not ctx.now()) for temporal reasoning about current events
+        current_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+        # Format results with clear delimiters to prevent hallucination
+        formatted_results = []
+        for i, r in enumerate(search_results):
+            source_block = (
+                f"SOURCE_ID: [{i+1}]\n"
+                f"TITLE: {r.get('title', 'Unknown')}\n"
+                f"URL: {r.get('url', 'Unknown')}\n"
+                f"DATE_PUBLISHED: {r.get('date', 'Unknown')}\n"
+                f"SNIPPET: {r.get('snippet', '')}"
+            )
+            formatted_results.append(source_block)
+
+        results_text = "\n\n---\n\n".join(formatted_results)
 
         synthesis_prompt = (
-            f"Analyze these search results for the following requirement:\n"
-            f"- Requirement: {requirement.description}\n"
-            f"- Market question: {prompt_spec.market.question}\n"
-            f"- Entity: {semantics.target_entity}\n"
-            f"- Predicate: {semantics.predicate}\n\n"
-            f"Search results:\n{results_text}\n\n"
-            f"Identify authoritative sources, extract relevant evidence, and provide "
-            f"a confidence score (0.0-1.0) for how well the evidence addresses the requirement."
+            f"### CONTEXT\n"
+            f"Current Date/Time: {current_time_str}\n"
+            f"Market Question: {prompt_spec.market.question}\n"
+            f"Event Definition: {event_def}\n"
+            f"Critical Assumptions (Must Follow):\n{assumptions_str}\n"
+            f"Entity: {semantics.target_entity}\n"
+            f"Predicate: {semantics.predicate}\n"
+            f"### DATA REQUIREMENT\n"
+            f"{requirement.description}\n\n"
+            f"### SEARCH RESULTS\n"
+            f"{results_text}\n\n"
+            f"### INSTRUCTIONS\n"
+            f"1. Analyze the 'SOURCE_ID's above to answer the Market Question.\n"
+            f"2. Compare the 'DATE_PUBLISHED' against 'Current Date/Time' to filter outdated info.\n"
+            f"3. Extract the answer into the 'parsed_value' field.\n"
+            f"4. If multiple sources conflict, explain why you chose the winner in 'reasoning_trace'.\n"
+            f"5. Return ONLY the JSON object defined in the system prompt."
         )
+        
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!synthesis_prompt:", synthesis_prompt)
 
         messages = [
             {"role": "system", "content": DEFERRED_DISCOVERY_SYSTEM_PROMPT},
@@ -667,59 +737,61 @@ class CollectorLLM(BaseAgent):
         ]
         response = ctx.llm.chat(messages)
 
-        # Parse synthesis response (with retry)
-        last_error: str | None = None
-        for attempt in range(self.MAX_RETRIES + 1):
-            try:
-                parsed = self._extract_json(response.content)
-                extracted = self._truncate_extracted_fields(
-                    parsed.get("extracted_fields", {})
-                )
+        # Parse synthesis response
+        try:
+            content = response.content.strip()
+            # Handle markdown-wrapped JSON
+            if content.startswith("```"):
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:]
 
-                # Include discovered_sources in extracted_fields
-                discovered = parsed.get("discovered_sources", [])
-                if discovered:
-                    extracted["discovered_sources"] = discovered
+            data = json.loads(content)
+            
+            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!! getting result data", data)
 
-                return EvidenceItem(
-                    evidence_id=evidence_id,
-                    requirement_id=requirement.requirement_id,
-                    provenance=Provenance(
-                        source_id="discover",
-                        source_uri="serper:search",
-                        tier=2,
-                        fetched_at=ctx.now(),
-                        content_hash=self._hash_content(response.content),
-                    ),
-                    raw_content=str(parsed.get("content_summary", ""))[:100],
-                    parsed_value=parsed.get("parsed_value"),
-                    extracted_fields=extracted,
-                    success=parsed.get("success", True),
-                    error=parsed.get("error"),
-                )
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                last_error = str(e)
-                if attempt < self.MAX_RETRIES:
-                    repair_prompt = (
-                        f"The JSON was invalid: {last_error}. "
-                        "Please fix and return valid JSON only."
-                    )
-                    messages.append({"role": "assistant", "content": response.content})
-                    messages.append({"role": "user", "content": repair_prompt})
-                    response = ctx.llm.chat(messages)
+            # Map the new schema to EvidenceItem
+            # Store evidence_sources and metadata in extracted_fields
+            extracted_fields = {
+                "confidence_score": data.get("confidence_score"),
+                "resolution_status": data.get("resolution_status"),
+                "evidence_sources": data.get("evidence_sources", []),
+            }
 
-        return EvidenceItem(
-            evidence_id=evidence_id,
-            requirement_id=requirement.requirement_id,
-            provenance=Provenance(
-                source_id="discover",
-                source_uri="serper:search",
-                tier=1,
-                fetched_at=ctx.now(),
-            ),
-            success=False,
-            error=f"Discovery synthesis failed: {last_error}",
-        )
+            # Determine success based on resolution_status
+            resolution_status = data.get("resolution_status", "UNRESOLVED")
+            success = resolution_status in ("RESOLVED", "AMBIGUOUS")
+
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement.requirement_id,
+                provenance=Provenance(
+                    source_id="discover",
+                    source_uri="serper:search",
+                    tier=2,
+                    fetched_at=ctx.now(),
+                    content_hash=self._hash_content(response.content),
+                ),
+                raw_content=str(data.get("reasoning_trace", ""))[:500],
+                parsed_value=data.get("parsed_value"),
+                extracted_fields=extracted_fields,
+                success=success,
+                error=None if success else f"Resolution status: {resolution_status}",
+            )
+
+        except json.JSONDecodeError:
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement.requirement_id,
+                provenance=Provenance(
+                    source_id="discover",
+                    source_uri="serper:search",
+                    tier=1,
+                    fetched_at=ctx.now(),
+                ),
+                success=False,
+                error=f"LLM failed to produce valid JSON. Raw output: {response.content[:100]}...",
+            )
 
     def _execute_search_queries(
         self,
