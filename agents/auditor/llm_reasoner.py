@@ -58,16 +58,16 @@ class LLMReasoner:
         self,
         ctx: "AgentContext",
         prompt_spec: PromptSpec,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: list[EvidenceBundle],
     ) -> ReasoningTrace:
         """
         Generate a reasoning trace using LLM.
-        
+
         Args:
             ctx: Agent context with LLM client
             prompt_spec: The prompt specification
-            evidence_bundle: Collected evidence
-        
+            evidence_bundles: List of collected evidence bundles from multiple collectors
+
         Returns:
             ReasoningTrace with all reasoning steps
         """
@@ -96,7 +96,7 @@ class LLMReasoner:
         
         # Prepare evidence and build messages; if estimated tokens exceed limit, reduce evidence and retry
         evidence_json = self._prepare_evidence_json(
-            evidence_bundle, max_chars=max_chars, max_items=max_items, ctx=ctx
+            evidence_bundles, max_chars=max_chars, max_items=max_items, ctx=ctx
         )
         # Format possible outcomes for prompt
         if prompt_spec.is_multi_choice:
@@ -129,7 +129,7 @@ class LLMReasoner:
         while self._estimate_tokens(messages) > target_tokens and max_chars > 2000:
             max_chars = max(2000, max_chars // 2)
             evidence_json = self._prepare_evidence_json(
-                evidence_bundle, max_chars=max_chars, max_items=max_items, ctx=ctx
+                evidence_bundles, max_chars=max_chars, max_items=max_items, ctx=ctx
             )
             user_prompt = USER_PROMPT_TEMPLATE.format(
                 question=prompt_spec.market.question,
@@ -160,7 +160,7 @@ class LLMReasoner:
         for attempt in range(self.MAX_RETRIES + 1):
             try:
                 parsed = self._extract_json(raw_output)
-                trace = self._build_trace(ctx, prompt_spec, evidence_bundle, parsed)
+                trace = self._build_trace(ctx, prompt_spec, evidence_bundles, parsed)
                 return trace
             except (json.JSONDecodeError, KeyError, ValueError) as e:
                 last_error = str(e)
@@ -179,20 +179,32 @@ class LLMReasoner:
     
     def _prepare_evidence_json(
         self,
-        bundle: EvidenceBundle,
+        bundles: list[EvidenceBundle],
         *,
         max_chars: int = DEFAULT_MAX_AUDIT_EVIDENCE_CHARS,
         max_items: int = DEFAULT_MAX_AUDIT_EVIDENCE_ITEMS,
         ctx: "AgentContext | None" = None,
     ) -> str:
-        """Prepare evidence bundle as JSON for LLM, with truncation to stay under context limit."""
-        total_bundle_items = len(bundle.items)
+        """Prepare evidence bundles as JSON for LLM, with truncation to stay under context limit.
+
+        Aggregates items from all bundles, including metadata about which collector
+        each item came from (from_collector, bundle_weight).
+        """
+        # Aggregate all items from all bundles with collector metadata
+        all_items_with_meta: list[tuple[Any, str, float, str]] = []  # (item, collector_name, weight, bundle_id)
+        for bundle in bundles:
+            collector_name = bundle.collector_name or "unknown"
+            weight = bundle.weight if bundle.weight is not None else 1.0
+            for item in bundle.items:
+                all_items_with_meta.append((item, collector_name, weight, bundle.bundle_id))
+
+        total_items_count = len(all_items_with_meta)
         # Apply item cap: keep first max_items, note the rest
-        items_to_serialize = bundle.items[:max_items]
-        truncated_by_count = total_bundle_items > max_items
-        
+        items_to_serialize = all_items_with_meta[:max_items]
+        truncated_by_count = total_items_count > max_items
+
         items = []
-        for item in items_to_serialize:
+        for item, collector_name, weight, bundle_id in items_to_serialize:
             # Truncate extracted_fields the same way as parsed_value
             safe_extracted = {
                 k: self._safe_value(v) for k, v in item.extracted_fields.items()
@@ -211,39 +223,54 @@ class LLMReasoner:
                     item.parsed_value,
                     max_str_chars=MAX_PRIMARY_EVIDENCE_CHARS,
                 ),
+                "from_collector": collector_name,
+                "bundle_weight": weight,
             })
-        
+
+        # Build bundle metadata list
+        bundles_meta = []
+        for bundle in bundles:
+            bundles_meta.append({
+                "bundle_id": bundle.bundle_id,
+                "collector_name": bundle.collector_name or "unknown",
+                "weight": bundle.weight if bundle.weight is not None else 1.0,
+                "item_count": len(bundle.items),
+            })
+
+        # Use first bundle's market_id (all should be same market)
+        market_id = bundles[0].market_id if bundles else ""
+
         payload: dict[str, Any] = {
-            "bundle_id": bundle.bundle_id,
-            "market_id": bundle.market_id,
-            "total_items": total_bundle_items,
+            "bundles": bundles_meta,
+            "market_id": market_id,
+            "total_items": total_items_count,
             "items": items,
         }
         if truncated_by_count:
             payload["_truncation_note"] = (
-                f"Only first {max_items} of {total_bundle_items} evidence items shown."
+                f"Only first {max_items} of {total_items_count} evidence items shown."
             )
-        
+
         evidence_json = json.dumps(payload, indent=2)
         truncated_by_size = False
-        
+
         # If still over max_chars, reduce by dropping items from the end until under
         while len(evidence_json) > max_chars and len(items) > 1:
             truncated_by_size = True
             items = items[:-1]
             payload["items"] = items
             payload["_truncation_note"] = (
-                f"Evidence truncated to {len(items)} items (total {total_bundle_items}) "
+                f"Evidence truncated to {len(items)} items (total {total_items_count}) "
                 f"to fit context limit ({max_chars} chars)."
             )
             evidence_json = json.dumps(payload, indent=2)
-        
+
         if ctx and (truncated_by_count or truncated_by_size):
             ctx.info(
                 f"Audit evidence truncated: {len(items)} items shown, "
-                f"total_items={total_bundle_items}, json_len={len(evidence_json)}"
+                f"total_items={total_items_count}, json_len={len(evidence_json)}"
             )
-        
+
         return evidence_json
     
     def _safe_value(
@@ -376,12 +403,14 @@ class LLMReasoner:
         self,
         ctx: "AgentContext",
         prompt_spec: PromptSpec,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: list[EvidenceBundle],
         data: dict[str, Any],
     ) -> ReasoningTrace:
         """Build ReasoningTrace from LLM JSON output."""
+        # Use first bundle's ID for trace_id and bundle_id
+        first_bundle_id = evidence_bundles[0].bundle_id if evidence_bundles else ""
         # Generate trace ID
-        trace_id = data.get("trace_id") or self._generate_trace_id(evidence_bundle.bundle_id)
+        trace_id = data.get("trace_id") or self._generate_trace_id(first_bundle_id)
         
         # Build steps
         steps: list[ReasoningStep] = []
@@ -432,7 +461,7 @@ class LLMReasoner:
         trace = ReasoningTrace(
             trace_id=trace_id,
             market_id=prompt_spec.market_id,
-            bundle_id=evidence_bundle.bundle_id,
+            bundle_id=first_bundle_id,
             steps=steps,
             conflicts=conflicts,
             evidence_summary=data.get("evidence_summary"),
