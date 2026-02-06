@@ -51,40 +51,50 @@ class RuleBasedReasoner:
         self,
         ctx: "AgentContext",
         prompt_spec: PromptSpec,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: list[EvidenceBundle],
     ) -> ReasoningTrace:
         """
         Generate a reasoning trace from evidence.
-        
+
         Args:
             ctx: Agent context
             prompt_spec: The prompt specification
-            evidence_bundle: Collected evidence
-        
+            evidence_bundles: List of collected evidence bundles
+
         Returns:
             ReasoningTrace with all reasoning steps
         """
+        # Combine evidence from all bundles
+        all_items: list[EvidenceItem] = []
+        for bundle in evidence_bundles:
+            all_items.extend(bundle.items)
+
+        # Use first bundle for market_id and bundle_id
+        primary_bundle = evidence_bundles[0] if evidence_bundles else None
+        market_id = primary_bundle.market_id if primary_bundle else "unknown"
+        bundle_id = primary_bundle.bundle_id if primary_bundle else "unknown"
+
         # Initialize trace
         trace = ReasoningTrace(
-            trace_id=self._generate_trace_id(evidence_bundle.bundle_id),
+            trace_id=self._generate_trace_id(bundle_id),
             market_id=prompt_spec.market_id,
-            bundle_id=evidence_bundle.bundle_id,
+            bundle_id=bundle_id,
             created_at=ctx.now() if not self.strict_mode else None,
         )
-        
+
         step_counter = 0
         confidence = 0.5  # Start neutral
-        
+
         # Step 1: Validity checks
-        valid_evidence = evidence_bundle.get_valid_evidence()
+        valid_evidence = [item for item in all_items if item.is_valid]
         
         step_counter += 1
         trace.add_step(ReasoningStep(
             step_id=f"step_{step_counter:03d}",
             step_type="validity_check",
-            description=f"Check validity of {len(evidence_bundle.items)} evidence items",
-            input_summary=f"Total items: {len(evidence_bundle.items)}",
-            output_summary=f"Valid items: {len(valid_evidence)}, Invalid: {len(evidence_bundle.items) - len(valid_evidence)}",
+            description=f"Check validity of {len(all_items)} evidence items",
+            input_summary=f"Total items: {len(all_items)}",
+            output_summary=f"Valid items: {len(valid_evidence)}, Invalid: {len(all_items) - len(valid_evidence)}",
             conclusion=f"{len(valid_evidence)} valid evidence items available",
             confidence_delta=0.0 if valid_evidence else -0.3,
         ))
