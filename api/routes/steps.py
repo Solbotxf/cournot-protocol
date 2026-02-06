@@ -112,9 +112,10 @@ class CollectRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt)"
     )
-    collector: Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock"] = Field(
-        default="CollectorLLM",
-        description="Which collector agent to use (CollectorLLM, CollectorHyDE, CollectorHTTP, CollectorMock)",
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock"]] = Field(
+        default=["CollectorLLM"],
+        description="Which collector agents to use (runs all in sequence)",
+        min_length=1,
     )
     execution_mode: Literal["production", "development", "test"] = Field(
         default="development",
@@ -130,12 +131,12 @@ class CollectResponse(BaseModel):
     """Response from evidence collection step."""
 
     ok: bool = Field(..., description="Whether collection succeeded")
-    collector_used: str | None = Field(default=None, description="Name of collector agent used")
-    evidence_bundle: dict[str, Any] | None = Field(
-        default=None, description="Collected evidence bundle"
+    collectors_used: list[str] = Field(default_factory=list, description="Names of collectors used")
+    evidence_bundles: list[dict[str, Any]] = Field(
+        default_factory=list, description="Evidence bundles from each collector"
     )
-    execution_log: dict[str, Any] | None = Field(
-        default=None, description="Tool execution log"
+    execution_logs: list[dict[str, Any]] = Field(
+        default_factory=list, description="Execution logs from each collector"
     )
     errors: list[str] = Field(default_factory=list)
 
@@ -361,19 +362,10 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
 @router.post("/collect", response_model=CollectResponse)
 async def run_collect(request: CollectRequest) -> CollectResponse:
     """
-    Run evidence collection step.
-
-    Collects evidence from sources specified in the tool_plan.
-    This is step 1 of the resolution pipeline.
-
-    Specify `collector` to choose which collector agent to use:
-    - CollectorLLM (default): Uses LLM to interpret web content
-    - CollectorHyDE: Uses HyDE pattern for hypothesis-guided search
-    - CollectorHTTP: Direct HTTP requests
-    - CollectorMock: Mock data for testing
+    Run evidence collection step with one or more collectors.
     """
     try:
-        logger.info(f"Running collect step with collector: {request.collector}")
+        logger.info(f"Running collect step with collectors: {request.collectors}")
 
         from core.schemas.prompts import PromptSpec
         from core.schemas.transport import ToolPlan
@@ -389,44 +381,47 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
         except Exception as e:
             return CollectResponse(ok=False, errors=[f"Invalid tool_plan: {e}"])
 
-        # Get context with LLM + HTTP for collector
         ctx = get_agent_context(with_llm=True, with_http=True)
-
-        # Get specified collector from registry
         registry = get_registry()
-        try:
-            collector = registry.get_agent_by_name(request.collector, ctx)
-        except ValueError as e:
-            return CollectResponse(
-                ok=False,
-                errors=[f"Collector not found: {request.collector}. Available: CollectorLLM, CollectorHyDE, CollectorHTTP, CollectorMock"],
-            )
 
-        logger.info(f"Using collector: {collector.name}")
+        bundles = []
+        logs = []
+        collectors_used = []
+        errors = []
 
-        result = collector.run(ctx, prompt_spec, tool_plan)
+        for collector_name in request.collectors:
+            try:
+                collector = registry.get_agent_by_name(collector_name, ctx)
+            except ValueError:
+                errors.append(f"Collector not found: {collector_name}")
+                continue
 
-        if not result.success:
-            return CollectResponse(
-                ok=False,
-                collector_used=collector.name,
-                errors=[result.error or "Collection failed"],
-            )
+            logger.info(f"Running collector: {collector.name}")
+            result = collector.run(ctx, prompt_spec, tool_plan)
 
-        evidence_bundle, execution_log = result.output
+            if not result.success:
+                errors.append(f"{collector_name}: {result.error or 'Collection failed'}")
+                continue
 
-        # Optionally strip raw_content
-        eb_dict = evidence_bundle.model_dump(mode="json")
-        if not request.include_raw_content:
-            for item in eb_dict.get("items", []):
-                item["raw_content"] = None
-                item["parsed_value"] = None
+            evidence_bundle, execution_log = result.output
+            evidence_bundle.collector_name = collector.name
+
+            eb_dict = evidence_bundle.model_dump(mode="json")
+            if not request.include_raw_content:
+                for item in eb_dict.get("items", []):
+                    item["raw_content"] = None
+                    item["parsed_value"] = None
+
+            bundles.append(eb_dict)
+            logs.append(execution_log.model_dump(mode="json") if execution_log else {})
+            collectors_used.append(collector.name)
 
         return CollectResponse(
-            ok=True,
-            collector_used=collector.name,
-            evidence_bundle=eb_dict,
-            execution_log=execution_log.model_dump(mode="json") if execution_log else None,
+            ok=len(bundles) > 0,
+            collectors_used=collectors_used,
+            evidence_bundles=bundles,
+            execution_logs=logs,
+            errors=errors,
         )
 
     except Exception as e:
