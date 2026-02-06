@@ -946,9 +946,483 @@ class CollectorLLM(BaseAgent):
         return truncated
 
 
+# =============================================================================
+# HyDE (Hypothetical Document Embeddings) Collector
+# =============================================================================
+
+HYDE_HYPOTHESIS_SYSTEM_PROMPT = """You are a Hypothetical Evidence Generator for a prediction market resolution system.
+
+Your task is to generate a **hypothetical ideal document** that would perfectly answer the given data requirement. This hypothetical document will be used to search for real sources.
+
+### INSTRUCTIONS
+1. Imagine you are writing the IDEAL news article, press release, or official statement that would definitively answer the question.
+2. Include specific details: dates, numbers, official names, and authoritative language.
+3. Write as if you are a journalist or official spokesperson reporting the verified facts.
+4. The document should be 2-4 paragraphs, realistic and authoritative.
+
+### OUTPUT FORMAT
+Return a single valid JSON object:
+{
+    "hypothetical_document": "The full text of the ideal document that would answer this question...",
+    "key_entities": ["entity1", "entity2"],
+    "key_phrases": ["phrase1", "phrase2", "phrase3"],
+    "search_queries": ["optimized search query 1", "optimized search query 2", "optimized search query 3"]
+}
+
+The search_queries should be derived from the hypothetical document to find real sources with similar content.
+"""
+
+HYDE_SYNTHESIS_SYSTEM_PROMPT = """You are an Evidence Synthesizer for a prediction market resolution system.
+
+You were given a HYPOTHETICAL document describing ideal evidence, and now you have REAL search results.
+Your task is to compare the real sources against the hypothetical expectation and extract verified facts.
+
+### CORE PROTOCOLS
+1. **Reality Check**: The hypothetical document is NOT real. Use it only as a template for what to look for.
+2. **Source Verification**: Only extract facts that appear in the REAL search results.
+3. **Confidence Calibration**:
+   - If real sources MATCH the hypothesis → high confidence
+   - If real sources CONTRADICT the hypothesis → report the contradiction
+   - If real sources are SILENT → report as unverified
+4. **Temporal Awareness**: Prefer the most recent sources. Check dates carefully.
+
+### OUTPUT FORMAT
+Return a single valid JSON object (no markdown):
+{
+    "hypothesis_match": "CONFIRMED" | "CONTRADICTED" | "PARTIAL" | "UNVERIFIED",
+    "reasoning_trace": "Step-by-step analysis of how real sources compare to the hypothesis...",
+    "parsed_value": "The specific answer extracted from REAL sources (not the hypothesis)",
+    "confidence_score": 0.0 to 1.0,
+    "evidence_sources": [
+        {
+            "source_id": "[X]",
+            "url": "...",
+            "credibility_tier": "Tier 1/Tier 2/Tier 3",
+            "supports_hypothesis": true/false,
+            "key_fact": "The specific fact extracted from this source"
+        }
+    ],
+    "discrepancies": ["Any differences between hypothesis and reality"]
+}
+"""
+
+
+class CollectorHyDE(BaseAgent):
+    """
+    HyDE (Hypothetical Document Embeddings) based Collector Agent.
+
+    Uses the HyDE technique for improved evidence retrieval:
+    1. Generate a hypothetical ideal document that would answer the requirement
+    2. Use the hypothesis to generate semantically-rich search queries
+    3. Search for real documents that match the hypothesis
+    4. Synthesize real evidence by comparing against the hypothesis
+
+    This approach often finds more relevant sources than direct query search
+    because the hypothetical document captures the semantic intent better.
+
+    Features:
+    - Hypothesis-guided search for better semantic matching
+    - Automatic comparison between expected and actual evidence
+    - Confidence calibration based on hypothesis match
+    - Works well for complex or nuanced requirements
+    """
+
+    _name = "CollectorHyDE"
+    _version = "v1"
+    _capabilities = {AgentCapability.LLM}
+    MAX_RETRIES = 2
+
+    def run(
+        self,
+        ctx: "AgentContext",
+        prompt_spec: PromptSpec,
+        tool_plan: ToolPlan,
+    ) -> AgentResult:
+        """
+        Execute collection using HyDE pattern.
+
+        Args:
+            ctx: Agent context with LLM client
+            prompt_spec: The prompt specification
+            tool_plan: The tool plan to execute
+
+        Returns:
+            AgentResult with (EvidenceBundle, ToolExecutionLog) as output
+        """
+        ctx.info(f"CollectorHyDE executing plan {tool_plan.plan_id}")
+
+        if ctx.llm is None:
+            return AgentResult.failure(error="LLM client not available")
+
+        bundle = EvidenceBundle(
+            bundle_id=f"hyde_{tool_plan.plan_id}",
+            market_id=prompt_spec.market_id,
+            plan_id=tool_plan.plan_id,
+        )
+
+        execution_log = ToolExecutionLog(
+            plan_id=tool_plan.plan_id,
+            started_at=ctx.now().isoformat(),
+        )
+
+        for req_id in tool_plan.requirements:
+            requirement = prompt_spec.get_requirement_by_id(req_id)
+            if not requirement:
+                continue
+
+            ctx.info(f"HyDE processing requirement: {req_id}")
+
+            # Use HyDE for all requirements (both deferred and explicit)
+            evidence = self._hyde_collect(ctx, requirement, prompt_spec)
+
+            call_record = ToolCallRecord(
+                tool="hyde:collect",
+                input={
+                    "requirement_id": req_id,
+                    "description": requirement.description,
+                },
+                started_at=ctx.now().isoformat(),
+            )
+            call_record.ended_at = ctx.now().isoformat()
+            call_record.output = {
+                "success": evidence.success,
+                "evidence_id": evidence.evidence_id,
+                "hypothesis_match": evidence.extracted_fields.get("hypothesis_match"),
+            }
+            if evidence.error:
+                call_record.error = evidence.error
+
+            execution_log.add_call(call_record)
+            bundle.add_item(evidence)
+
+        bundle.collected_at = ctx.now()
+        bundle.requirements_fulfilled = [
+            req_id for req_id in tool_plan.requirements
+            if any(e.requirement_id == req_id and e.success for e in bundle.items)
+        ]
+        bundle.requirements_unfulfilled = [
+            req_id for req_id in tool_plan.requirements
+            if req_id not in bundle.requirements_fulfilled
+        ]
+        execution_log.ended_at = ctx.now().isoformat()
+
+        return AgentResult(
+            output=(bundle, execution_log),
+            verification=self._validate_output(bundle, tool_plan),
+            receipts=ctx.get_receipt_refs(),
+            metadata={
+                "collector": "hyde",
+                "bundle_id": bundle.bundle_id,
+                "items_collected": len(bundle.items),
+            },
+        )
+
+    def _hyde_collect(
+        self,
+        ctx: "AgentContext",
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+    ) -> EvidenceItem:
+        """
+        Collect evidence using HyDE pattern.
+
+        Flow:
+        1. Generate hypothetical document that would answer the requirement
+        2. Extract search queries from the hypothesis
+        3. Search for real sources
+        4. Synthesize by comparing real sources to hypothesis
+        """
+        semantics = prompt_spec.prediction_semantics
+        evidence_id = hashlib.sha256(
+            f"hyde:{requirement.requirement_id}".encode()
+        ).hexdigest()[:16]
+
+        event_def = prompt_spec.market.event_definition
+        assumptions_list = prompt_spec.extra.get("assumptions", [])
+        assumptions_str = "\n".join([f"- {a}" for a in assumptions_list]) if assumptions_list else "None"
+
+        # Step 1: Generate hypothetical document
+        ctx.info("HyDE Step 1: Generating hypothetical document...")
+        hypothesis_prompt = (
+            f"Generate a hypothetical ideal document for this requirement:\n\n"
+            f"### REQUIREMENT\n"
+            f"{requirement.description}\n\n"
+            f"### CONTEXT\n"
+            f"Market Question: {prompt_spec.market.question}\n"
+            f"Event Definition: {event_def}\n"
+            f"Assumptions:\n{assumptions_str}\n"
+            f"Target Entity: {semantics.target_entity}\n"
+            f"Predicate: {semantics.predicate}\n"
+            f"Threshold: {semantics.threshold or 'N/A'}\n\n"
+            f"### TASK\n"
+            f"Write a hypothetical news article or official statement that would "
+            f"definitively answer whether '{semantics.target_entity}' '{semantics.predicate}'."
+        )
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": HYDE_HYPOTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": hypothesis_prompt},
+        ]
+
+        response = ctx.llm.chat(messages)
+
+        try:
+            hypothesis_data = self._extract_json(response.content)
+            hypothetical_doc = hypothesis_data.get("hypothetical_document", "")
+            search_queries = hypothesis_data.get("search_queries", [])[:3]
+            key_phrases = hypothesis_data.get("key_phrases", [])
+        except (json.JSONDecodeError, KeyError) as e:
+            ctx.warning(f"Failed to parse hypothesis: {e}")
+            # Fallback: use requirement description as search query
+            hypothetical_doc = requirement.description
+            search_queries = [f"{semantics.target_entity} {semantics.predicate}"]
+            key_phrases = []
+
+        if not search_queries:
+            search_queries = [f"{semantics.target_entity} {semantics.predicate}"]
+
+        ctx.info(f"HyDE generated {len(search_queries)} search queries")
+
+        # Step 2: Search for real sources using hypothesis-derived queries
+        ctx.info("HyDE Step 2: Searching for real sources...")
+        search_results = self._execute_search_queries(ctx, search_queries)
+
+        if not search_results:
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement.requirement_id,
+                provenance=Provenance(
+                    source_id="hyde",
+                    source_uri="serper:search",
+                    tier=1,
+                    fetched_at=ctx.now(),
+                ),
+                success=False,
+                error="No search results found (Serper API may not be configured)",
+                extracted_fields={
+                    "hypothetical_document": hypothetical_doc[:500],
+                    "hypothesis_match": "UNVERIFIED",
+                },
+            )
+
+        # Step 3: Synthesize real evidence by comparing to hypothesis
+        ctx.info("HyDE Step 3: Synthesizing evidence...")
+        current_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        # Format search results
+        formatted_results = []
+        for i, r in enumerate(search_results):
+            source_block = (
+                f"SOURCE_ID: [{i+1}]\n"
+                f"TITLE: {r.get('title', 'Unknown')}\n"
+                f"URL: {r.get('url', 'Unknown')}\n"
+                f"DATE_PUBLISHED: {r.get('date', 'Unknown')}\n"
+                f"SNIPPET: {r.get('snippet', '')}"
+            )
+            formatted_results.append(source_block)
+
+        results_text = "\n\n---\n\n".join(formatted_results)
+
+        synthesis_prompt = (
+            f"### HYPOTHETICAL DOCUMENT (for reference only - NOT real)\n"
+            f"{hypothetical_doc[:1000]}\n\n"
+            f"### KEY PHRASES TO LOOK FOR\n"
+            f"{', '.join(key_phrases) if key_phrases else 'N/A'}\n\n"
+            f"### CURRENT DATE/TIME\n"
+            f"{current_time_str}\n\n"
+            f"### MARKET QUESTION\n"
+            f"{prompt_spec.market.question}\n\n"
+            f"### REAL SEARCH RESULTS\n"
+            f"{results_text}\n\n"
+            f"### TASK\n"
+            f"Compare the REAL search results above to the hypothetical document.\n"
+            f"Extract ONLY verified facts from the real sources.\n"
+            f"Report whether the hypothesis is CONFIRMED, CONTRADICTED, PARTIAL, or UNVERIFIED."
+        )
+
+        messages = [
+            {"role": "system", "content": HYDE_SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": synthesis_prompt},
+        ]
+
+        response = ctx.llm.chat(messages)
+
+        # Parse synthesis response
+        try:
+            content = response.content.strip()
+            if content.startswith("```"):
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:]
+
+            data = json.loads(content)
+
+            hypothesis_match = data.get("hypothesis_match", "UNVERIFIED")
+            confidence_score = data.get("confidence_score", 0.5)
+
+            # Determine success based on hypothesis match and confidence
+            success = hypothesis_match in ("CONFIRMED", "PARTIAL") and confidence_score >= 0.5
+
+            extracted_fields = {
+                "hypothesis_match": hypothesis_match,
+                "confidence_score": confidence_score,
+                "evidence_sources": data.get("evidence_sources", []),
+                "discrepancies": data.get("discrepancies", []),
+                "hypothetical_document": hypothetical_doc[:300],
+            }
+
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement.requirement_id,
+                provenance=Provenance(
+                    source_id="hyde",
+                    source_uri="serper:search",
+                    tier=2,
+                    fetched_at=ctx.now(),
+                    content_hash=self._hash_content(response.content),
+                ),
+                raw_content=str(data.get("reasoning_trace", ""))[:500],
+                parsed_value=data.get("parsed_value"),
+                extracted_fields=extracted_fields,
+                success=success,
+                error=None if success else f"Hypothesis {hypothesis_match}, confidence {confidence_score:.2f}",
+            )
+
+        except json.JSONDecodeError:
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=requirement.requirement_id,
+                provenance=Provenance(
+                    source_id="hyde",
+                    source_uri="serper:search",
+                    tier=1,
+                    fetched_at=ctx.now(),
+                ),
+                success=False,
+                error=f"Failed to parse synthesis: {response.content[:100]}...",
+                extracted_fields={
+                    "hypothetical_document": hypothetical_doc[:300],
+                    "hypothesis_match": "UNVERIFIED",
+                },
+            )
+
+    def _execute_search_queries(
+        self,
+        ctx: "AgentContext",
+        queries: list[str],
+    ) -> list[dict[str, str]]:
+        """Execute search queries via Serper API."""
+        api_key = os.getenv("SERPER_API_KEY", "").strip()
+        if ctx.config and hasattr(ctx.config, "serper") and ctx.config.serper:
+            api_key = (ctx.config.serper.api_key or "").strip() or api_key
+
+        if not api_key or not ctx.http:
+            ctx.warning("Serper API not configured for HyDE search")
+            return []
+
+        all_results: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        for query in queries:
+            try:
+                response = ctx.http.post(
+                    "https://google.serper.dev/search",
+                    headers={
+                        "X-API-KEY": api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"q": query},
+                    timeout=30.0,
+                )
+                if not response.ok:
+                    ctx.warning(f"Serper search failed for '{query}': HTTP {response.status_code}")
+                    continue
+
+                data = response.json()
+                for item in data.get("organic", [])[:5]:
+                    url = item.get("link", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        all_results.append({
+                            "title": item.get("title", ""),
+                            "snippet": item.get("snippet", ""),
+                            "url": url,
+                            "date": item.get("date", "Unknown"),
+                        })
+            except Exception as e:
+                ctx.warning(f"Serper search error for '{query}': {e}")
+
+        return all_results
+
+    def _validate_output(
+        self,
+        bundle: EvidenceBundle,
+        tool_plan: ToolPlan,
+    ) -> VerificationResult:
+        """Validate collection results."""
+        checks: list[CheckResult] = []
+
+        if bundle.has_evidence:
+            checks.append(CheckResult.passed(
+                check_id="has_evidence",
+                message=f"HyDE collected {len(bundle.items)} evidence items",
+            ))
+        else:
+            checks.append(CheckResult.failed(
+                check_id="has_evidence",
+                message="No evidence was collected",
+            ))
+
+        # Check hypothesis match quality
+        confirmed_count = sum(
+            1 for e in bundle.items
+            if e.extracted_fields.get("hypothesis_match") == "CONFIRMED"
+        )
+        if confirmed_count > 0:
+            checks.append(CheckResult.passed(
+                check_id="hypothesis_confirmed",
+                message=f"{confirmed_count} items confirmed by real sources",
+            ))
+
+        unfulfilled = bundle.requirements_unfulfilled
+        if not unfulfilled:
+            checks.append(CheckResult.passed(
+                check_id="requirements_fulfilled",
+                message="All requirements fulfilled",
+            ))
+        else:
+            checks.append(CheckResult.warning(
+                check_id="requirements_fulfilled",
+                message=f"Unfulfilled requirements: {unfulfilled}",
+            ))
+
+        ok = all(c.ok for c in checks)
+        return VerificationResult(ok=ok, checks=checks)
+
+    @staticmethod
+    def _extract_json(text: str) -> dict[str, Any]:
+        """Extract JSON from LLM response text."""
+        # Try markdown code block first
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if json_match:
+            return json.loads(json_match.group(1).strip())
+        # Fall back to raw {…} extraction
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            return json.loads(text[start:end])
+        return json.loads(text.strip())
+
+    @staticmethod
+    def _hash_content(content: str) -> str:
+        """Hash content using SHA256."""
+        return hashlib.sha256(content.encode()).hexdigest()
+
+
 def get_collector(
     ctx: "AgentContext",
     *,
+    prefer_hyde: bool = False,
     prefer_llm: bool = True,
     prefer_http: bool = True,
     mock_responses: dict[str, Any] | None = None,
@@ -958,13 +1432,16 @@ def get_collector(
 
     Args:
         ctx: Agent context
+        prefer_hyde: If True and LLM + HTTP available, use HyDE collector
         prefer_llm: If True and LLM client available, use LLM collector
         prefer_http: If True and HTTP client available, use HTTP collector
         mock_responses: Mock responses for mock collector
 
     Returns:
-        CollectorLLM, CollectorHTTP, or CollectorMock
+        CollectorHyDE, CollectorLLM, CollectorHTTP, or CollectorMock
     """
+    if prefer_hyde and ctx.llm is not None and ctx.http is not None:
+        return CollectorHyDE()
     if prefer_llm and ctx.llm is not None:
         return CollectorLLM()
     if prefer_http and ctx.http is not None:
@@ -1000,10 +1477,18 @@ def _register_agents() -> None:
     """Register collector agents."""
     register_agent(
         step=AgentStep.COLLECTOR,
+        name="CollectorHyDE",
+        factory=lambda ctx: CollectorHyDE(),
+        capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
+        priority=160,  # Highest - HyDE requires both LLM and HTTP
+    )
+
+    register_agent(
+        step=AgentStep.COLLECTOR,
         name="CollectorLLM",
         factory=lambda ctx: CollectorLLM(),
         capabilities={AgentCapability.LLM},
-        priority=150,  # Highest - preferred when LLM available
+        priority=150,  # High - preferred when LLM available
     )
 
     register_agent(
