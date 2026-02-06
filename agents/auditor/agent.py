@@ -66,33 +66,38 @@ class AuditorLLM(BaseAgent):
         self,
         ctx: "AgentContext",
         prompt_spec: PromptSpec,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: EvidenceBundle | list[EvidenceBundle],
     ) -> AgentResult:
         """
         Generate reasoning trace from evidence.
-        
+
         Args:
             ctx: Agent context with LLM client
             prompt_spec: The prompt specification
-            evidence_bundle: Collected evidence
-        
+            evidence_bundles: Collected evidence (single bundle or list)
+
         Returns:
             AgentResult with ReasoningTrace as output
         """
-        ctx.info(f"AuditorLLM analyzing {len(evidence_bundle.items)} evidence items")
-        
+        # Normalize to list
+        if isinstance(evidence_bundles, EvidenceBundle):
+            evidence_bundles = [evidence_bundles]
+
+        total_items = sum(len(b.items) for b in evidence_bundles)
+        ctx.info(f"AuditorLLM analyzing {total_items} evidence items from {len(evidence_bundles)} bundles")
+
         # Check LLM client
         if not ctx.llm:
             return AgentResult.failure(
                 error="LLM client required for LLM auditor",
             )
-        
+
         try:
             # Generate reasoning trace
-            trace = self.reasoner.reason(ctx, prompt_spec, evidence_bundle)
-            
+            trace = self.reasoner.reason(ctx, prompt_spec, evidence_bundles)
+
             # Validate output
-            verification = self._validate_trace(trace, evidence_bundle)
+            verification = self._validate_trace(trace, evidence_bundles)
             
             ctx.info(
                 f"Reasoning complete: {trace.step_count} steps, "
@@ -121,11 +126,11 @@ class AuditorLLM(BaseAgent):
     def _validate_trace(
         self,
         trace: ReasoningTrace,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: list[EvidenceBundle],
     ) -> VerificationResult:
         """Validate the reasoning trace."""
         checks: list[CheckResult] = []
-        
+
         # Check 1: Has steps
         if trace.steps:
             checks.append(CheckResult.passed(
@@ -137,7 +142,7 @@ class AuditorLLM(BaseAgent):
                 check_id="has_steps",
                 message="Trace has no reasoning steps",
             ))
-        
+
         # Check 2: Has preliminary outcome
         if trace.preliminary_outcome:
             checks.append(CheckResult.passed(
@@ -149,10 +154,13 @@ class AuditorLLM(BaseAgent):
                 check_id="has_outcome",
                 message="No preliminary outcome determined",
             ))
-        
+
         # Check 3: References evidence
         ref_ids = set(trace.get_evidence_refs())
-        evidence_ids = {e.evidence_id for e in evidence_bundle.items}
+        # Collect evidence IDs from ALL bundles
+        evidence_ids: set[str] = set()
+        for bundle in evidence_bundles:
+            evidence_ids.update(e.evidence_id for e in bundle.items)
         
         if ref_ids:
             invalid_refs = ref_ids - evidence_ids
@@ -221,27 +229,32 @@ class AuditorRuleBased(BaseAgent):
         self,
         ctx: "AgentContext",
         prompt_spec: PromptSpec,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: EvidenceBundle | list[EvidenceBundle],
     ) -> AgentResult:
         """
         Generate reasoning trace from evidence.
-        
+
         Args:
             ctx: Agent context
             prompt_spec: The prompt specification
-            evidence_bundle: Collected evidence
-        
+            evidence_bundles: Collected evidence (single bundle or list)
+
         Returns:
             AgentResult with ReasoningTrace as output
         """
-        ctx.info(f"AuditorRuleBased analyzing {len(evidence_bundle.items)} evidence items")
-        
+        # Normalize to list
+        if isinstance(evidence_bundles, EvidenceBundle):
+            evidence_bundles = [evidence_bundles]
+
+        total_items = sum(len(b.items) for b in evidence_bundles)
+        ctx.info(f"AuditorRuleBased analyzing {total_items} evidence items from {len(evidence_bundles)} bundles")
+
         try:
             # Generate reasoning trace
-            trace = self.reasoner.reason(ctx, prompt_spec, evidence_bundle)
-            
+            trace = self.reasoner.reason(ctx, prompt_spec, evidence_bundles)
+
             # Validate output
-            verification = self._validate_trace(trace, evidence_bundle)
+            verification = self._validate_trace(trace, evidence_bundles)
             
             ctx.info(
                 f"Reasoning complete: {trace.step_count} steps, "
@@ -270,11 +283,11 @@ class AuditorRuleBased(BaseAgent):
     def _validate_trace(
         self,
         trace: ReasoningTrace,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: list[EvidenceBundle],
     ) -> VerificationResult:
         """Validate the reasoning trace."""
         checks: list[CheckResult] = []
-        
+
         # Check 1: Has steps
         if trace.steps:
             checks.append(CheckResult.passed(
@@ -286,7 +299,7 @@ class AuditorRuleBased(BaseAgent):
                 check_id="has_steps",
                 message="Trace has no reasoning steps",
             ))
-        
+
         # Check 2: Has preliminary outcome
         if trace.preliminary_outcome:
             checks.append(CheckResult.passed(
@@ -298,7 +311,7 @@ class AuditorRuleBased(BaseAgent):
                 check_id="has_outcome",
                 message="No preliminary outcome determined",
             ))
-        
+
         # Check 3: Trace ID format
         if trace.trace_id.startswith("trace_"):
             checks.append(CheckResult.passed(
@@ -334,24 +347,24 @@ def get_auditor(ctx: "AgentContext", *, prefer_llm: bool = True) -> BaseAgent:
 def audit_evidence(
     ctx: "AgentContext",
     prompt_spec: PromptSpec,
-    evidence_bundle: EvidenceBundle,
+    evidence_bundles: EvidenceBundle | list[EvidenceBundle],
     *,
     prefer_llm: bool = True,
 ) -> AgentResult:
     """
     Convenience function to audit evidence.
-    
+
     Args:
         ctx: Agent context
         prompt_spec: The prompt specification
-        evidence_bundle: Collected evidence
+        evidence_bundles: Collected evidence (single bundle or list)
         prefer_llm: If True and LLM is available, use LLM auditor
-    
+
     Returns:
         AgentResult with ReasoningTrace as output
     """
     auditor = get_auditor(ctx, prefer_llm=prefer_llm)
-    return auditor.run(ctx, prompt_spec, evidence_bundle)
+    return auditor.run(ctx, prompt_spec, evidence_bundles)
 
 
 # Register agents with the global registry
