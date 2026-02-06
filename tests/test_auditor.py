@@ -111,7 +111,7 @@ class TestRuleBasedReasoner:
         prompt_spec = create_test_prompt_spec()
         evidence_bundle = create_test_evidence_bundle(price=105000)  # Above 100k
         
-        trace = reasoner.reason(ctx, prompt_spec, evidence_bundle)
+        trace = reasoner.reason(ctx, prompt_spec, [evidence_bundle])
         
         assert trace.preliminary_outcome == "YES"
         assert trace.preliminary_confidence > 0.5
@@ -125,7 +125,7 @@ class TestRuleBasedReasoner:
         prompt_spec = create_test_prompt_spec()
         evidence_bundle = create_test_evidence_bundle(price=95000)  # Below 100k
         
-        trace = reasoner.reason(ctx, prompt_spec, evidence_bundle)
+        trace = reasoner.reason(ctx, prompt_spec, [evidence_bundle])
         
         assert trace.preliminary_outcome == "NO"
         assert trace.step_count >= 3
@@ -142,7 +142,7 @@ class TestRuleBasedReasoner:
             plan_id="plan_test123",
         )
         
-        trace = reasoner.reason(ctx, prompt_spec, evidence_bundle)
+        trace = reasoner.reason(ctx, prompt_spec, [evidence_bundle])
         
         assert trace.preliminary_outcome == "INVALID"
         assert trace.preliminary_confidence < 0.5
@@ -178,7 +178,7 @@ class TestRuleBasedReasoner:
             extracted_fields={"price_usd": 120000},  # 20% higher
         ))
         
-        trace = reasoner.reason(ctx, prompt_spec, bundle)
+        trace = reasoner.reason(ctx, prompt_spec, [bundle])
         
         assert trace.has_conflicts
         assert len(trace.conflicts) >= 1
@@ -193,7 +193,7 @@ class TestRuleBasedReasoner:
         prompt_spec = create_test_prompt_spec()
         evidence_bundle = create_test_evidence_bundle()
         
-        trace = reasoner.reason(ctx, prompt_spec, evidence_bundle)
+        trace = reasoner.reason(ctx, prompt_spec, [evidence_bundle])
         
         assert trace.created_at is None
 
@@ -422,9 +422,147 @@ class TestReasoningTrace:
         assert len(analysis_steps) == 2
 
 
+class TestMultipleBundles:
+    """Tests for auditor processing multiple evidence bundles."""
+
+    def test_auditor_with_multiple_bundles(self):
+        """Test auditor processes multiple evidence bundles from different collectors."""
+        ctx = AgentContext.create_minimal()
+
+        prompt_spec = create_test_prompt_spec()
+
+        # Create two bundles with different collector names
+        bundle1 = EvidenceBundle(
+            bundle_id="bundle_1",
+            market_id="mk_test123",
+            plan_id="plan_test123",
+            collector_name="CollectorLLM",
+        )
+        bundle1.add_item(EvidenceItem(
+            evidence_id="ev_001",
+            requirement_id="req_001",
+            provenance=Provenance(
+                source_id="coingecko",
+                source_uri="https://api.coingecko.com/price",
+                tier=3,
+            ),
+            success=True,
+            extracted_fields={"price_usd": 105000},
+        ))
+
+        bundle2 = EvidenceBundle(
+            bundle_id="bundle_2",
+            market_id="mk_test123",
+            plan_id="plan_test123",
+            collector_name="CollectorHyDE",
+        )
+        bundle2.add_item(EvidenceItem(
+            evidence_id="ev_002",
+            requirement_id="req_001",
+            provenance=Provenance(
+                source_id="binance",
+                source_uri="https://api.binance.com/price",
+                tier=2,
+            ),
+            success=True,
+            extracted_fields={"price_usd": 104500},
+        ))
+
+        auditor = AuditorRuleBased()
+        result = auditor.run(ctx, prompt_spec, [bundle1, bundle2])
+
+        assert result.success
+        trace = result.output
+
+        # With prices above 100k, should be YES
+        assert trace.preliminary_outcome == "YES"
+
+        # Verify step count shows processing happened
+        assert trace.step_count >= 3
+
+        # Verify metadata is present
+        assert result.metadata["auditor"] == "rule_based"
+        assert "trace_id" in result.metadata
+
+    def test_reasoner_combines_evidence_from_multiple_bundles(self):
+        """Test that reasoner properly combines evidence from all bundles."""
+        ctx = AgentContext.create_minimal()
+        reasoner = RuleBasedReasoner()
+
+        prompt_spec = create_test_prompt_spec()
+
+        # Bundle 1: Evidence from one source
+        bundle1 = EvidenceBundle(
+            bundle_id="bundle_1",
+            market_id="mk_test123",
+            plan_id="plan_test123",
+            collector_name="CollectorHTTP",
+        )
+        bundle1.add_item(EvidenceItem(
+            evidence_id="ev_001",
+            requirement_id="req_001",
+            provenance=Provenance(source_id="source1", source_uri="https://source1.com", tier=3),
+            success=True,
+            extracted_fields={"price_usd": 110000},
+        ))
+
+        # Bundle 2: Evidence from another source
+        bundle2 = EvidenceBundle(
+            bundle_id="bundle_2",
+            market_id="mk_test123",
+            plan_id="plan_test123",
+            collector_name="CollectorLLM",
+        )
+        bundle2.add_item(EvidenceItem(
+            evidence_id="ev_002",
+            requirement_id="req_001",
+            provenance=Provenance(source_id="source2", source_uri="https://source2.com", tier=2),
+            success=True,
+            extracted_fields={"price_usd": 108000},
+        ))
+
+        trace = reasoner.reason(ctx, prompt_spec, [bundle1, bundle2])
+
+        # Should use all evidence from both bundles
+        assert trace.preliminary_outcome == "YES"  # Both prices above 100k
+
+        # Both pieces of evidence should contribute to the reasoning
+        # The trace should reflect analysis of multiple sources
+        evidence_refs = trace.get_evidence_refs()
+        # At least one evidence should be referenced
+        assert len(evidence_refs) >= 1
+
+    def test_multiple_empty_bundles(self):
+        """Test handling of multiple empty bundles."""
+        ctx = AgentContext.create_minimal()
+
+        prompt_spec = create_test_prompt_spec()
+
+        bundle1 = EvidenceBundle(
+            bundle_id="bundle_1",
+            market_id="mk_test123",
+            plan_id="plan_test123",
+            collector_name="CollectorHTTP",
+        )
+        bundle2 = EvidenceBundle(
+            bundle_id="bundle_2",
+            market_id="mk_test123",
+            plan_id="plan_test123",
+            collector_name="CollectorLLM",
+        )
+
+        auditor = AuditorRuleBased()
+        result = auditor.run(ctx, prompt_spec, [bundle1, bundle2])
+
+        # Should succeed but produce INVALID outcome due to no evidence
+        assert result.success
+        trace = result.output
+        assert trace.preliminary_outcome == "INVALID"
+
+
 class TestIntegration:
     """Integration tests for full pipeline through auditor."""
-    
+
     def test_full_pipeline_with_rule_based(self):
         """Test full pipeline from question to reasoning trace."""
         import json
