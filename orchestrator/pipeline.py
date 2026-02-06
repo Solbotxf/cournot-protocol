@@ -127,7 +127,7 @@ class RunResult:
     """Complete result of a pipeline run."""
     prompt_spec: Optional[PromptSpec] = None
     tool_plan: Optional[ToolPlan] = None
-    evidence_bundle: Optional[EvidenceBundle] = None
+    evidence_bundles: list[EvidenceBundle] = field(default_factory=list)
     execution_log: Optional[ToolExecutionLog] = None
     audit_trace: Optional[ReasoningTrace] = None
     audit_verification: Optional[VerificationResult] = None
@@ -140,15 +140,20 @@ class RunResult:
     ok: bool = False
     checks: list[CheckResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    
+
+    @property
+    def evidence_bundle(self) -> Optional[EvidenceBundle]:
+        """Backward compatible: returns first bundle or None."""
+        return self.evidence_bundles[0] if self.evidence_bundles else None
+
     @property
     def market_id(self) -> Optional[str]:
         return self.verdict.market_id if self.verdict else None
-    
+
     @property
     def outcome(self) -> Optional[str]:
         return self.verdict.outcome if self.verdict else None
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
@@ -509,15 +514,16 @@ class Pipeline:
             
             logger.info(f"Running collector: {agent.name} with prompt_spec {state.prompt_spec} and tool plan {state.tool_plan}")
             result: AgentResult = agent.run(ctx, state.prompt_spec, state.tool_plan)
-            
+
             if not result.success:
                 state.add_error(f"Evidence collection failed: {result.error}")
                 return state
-            
+
             evidence_bundle, execution_log = result.output
-            state.evidence_bundle = evidence_bundle
+            evidence_bundle.collector_name = agent.name  # Track which collector
+            state.evidence_bundles = [evidence_bundle]  # Store as list
             state.execution_log = execution_log
-            
+
             state.add_check(CheckResult.passed(
                 "evidence_collection",
                 f"Collected {len(evidence_bundle.items)} evidence items",
@@ -538,19 +544,19 @@ class Pipeline:
     ) -> PipelineState:
         """Step 3: Produce reasoning trace."""
         ctx = self._resolve_ctx(state.context, AgentStep.AUDITOR)
-        
-        if not state.prompt_spec or not state.evidence_bundle:
-            state.add_error("Cannot audit: missing prompt_spec or evidence_bundle")
+
+        if not state.prompt_spec or not state.evidence_bundles:
+            state.add_error("Cannot audit: missing prompt_spec or evidence_bundles")
             return state
-        
+
         try:
             agent = self._select_agent(AgentStep.AUDITOR, override, ctx)
             if agent is None:
                 state.add_error("No auditor agent available")
                 return state
-            
+
             logger.info(f"Running auditor: {agent.name}")
-            result: AgentResult = agent.run(ctx, state.prompt_spec, state.evidence_bundle)
+            result: AgentResult = agent.run(ctx, state.prompt_spec, state.evidence_bundles)
             
             if not result.success:
                 state.add_error(f"Audit failed: {result.error}")
@@ -583,20 +589,20 @@ class Pipeline:
     ) -> PipelineState:
         """Step 4: Produce verdict."""
         ctx = self._resolve_ctx(state.context, AgentStep.JUDGE)
-        
-        if not state.prompt_spec or not state.evidence_bundle or not state.audit_trace:
+
+        if not state.prompt_spec or not state.evidence_bundles or not state.audit_trace:
             state.add_error("Cannot judge: missing required artifacts")
             return state
-        
+
         try:
             agent = self._select_agent(AgentStep.JUDGE, override, ctx)
             if agent is None:
                 state.add_error("No judge agent available")
                 return state
-            
+
             logger.info(f"Running judge: {agent.name}")
             result: AgentResult = agent.run(
-                ctx, state.prompt_spec, state.evidence_bundle, state.audit_trace
+                ctx, state.prompt_spec, state.evidence_bundles, state.audit_trace
             )
             
             if not result.success:
@@ -625,14 +631,16 @@ class Pipeline:
     
     def _step_build_por_bundle(self, state: PipelineState) -> PipelineState:
         """Step 5: Build PoR bundle."""
-        if not all([state.prompt_spec, state.evidence_bundle, state.audit_trace, state.verdict]):
+        if not all([state.prompt_spec, state.evidence_bundles, state.audit_trace, state.verdict]):
             state.add_error("Cannot build PoR bundle: missing artifacts")
             return state
-        
+
         try:
+            # Use first bundle for PoR computation
+            evidence_bundle = state.evidence_bundles[0]
             roots = compute_roots(
                 state.prompt_spec,
-                state.evidence_bundle,
+                evidence_bundle,
                 state.audit_trace,
                 state.verdict,
             )
@@ -640,7 +648,7 @@ class Pipeline:
             
             por_bundle = build_por_bundle(
                 state.prompt_spec,
-                state.evidence_bundle,
+                evidence_bundle,
                 state.audit_trace,
                 state.verdict,
                 include_por_root=True,
@@ -667,11 +675,11 @@ class Pipeline:
         """Step 6: Verify with Sentinel."""
         ctx = self._resolve_ctx(state.context, AgentStep.SENTINEL)
         
-        if not all([state.por_bundle, state.prompt_spec, state.evidence_bundle, 
+        if not all([state.por_bundle, state.prompt_spec, state.evidence_bundles,
                     state.audit_trace, state.verdict]):
             state.add_error("Cannot verify: missing artifacts")
             return state
-        
+
         try:
             agent = self._select_agent(AgentStep.SENTINEL, override, ctx)
             if agent is None:
@@ -683,15 +691,16 @@ class Pipeline:
                         "Sentinel verification skipped (no agent available)",
                     ))
                 return state
-            
+
             logger.info(f"Running sentinel: {agent.name}")
-            
-            # Build proof bundle for sentinel
+
+            # Build proof bundle for sentinel (use first bundle)
             from agents.sentinel import build_proof_bundle
+            evidence_bundle = state.evidence_bundles[0]
             proof_bundle = build_proof_bundle(
                 state.prompt_spec,
                 state.tool_plan,
-                state.evidence_bundle,
+                evidence_bundle,
                 state.audit_trace,
                 state.verdict,
                 state.execution_log,
@@ -735,7 +744,7 @@ class Pipeline:
         return RunResult(
             prompt_spec=state.prompt_spec,
             tool_plan=state.tool_plan,
-            evidence_bundle=state.evidence_bundle,
+            evidence_bundles=state.evidence_bundles,
             execution_log=getattr(state, 'execution_log', None),
             audit_trace=state.audit_trace,
             audit_verification=state.audit_verification,

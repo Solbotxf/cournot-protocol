@@ -50,7 +50,7 @@ class PipelineState:
     tool_plan: Optional[ToolPlan] = None
     
     # Step 2: Evidence collection
-    evidence_bundle: Optional[EvidenceBundle] = None
+    evidence_bundles: list["EvidenceBundle"] = field(default_factory=list)
     execution_log: Optional[ToolExecutionLog] = None
     
     # Step 3: Audit / reasoning trace
