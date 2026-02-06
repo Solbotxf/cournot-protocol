@@ -56,7 +56,7 @@ class VerdictBuilder:
         self,
         ctx: "AgentContext",
         prompt_spec: PromptSpec,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: EvidenceBundle | list[EvidenceBundle],
         reasoning_trace: ReasoningTrace,
         *,
         override_outcome: str | None = None,
@@ -65,33 +65,40 @@ class VerdictBuilder:
     ) -> DeterministicVerdict:
         """
         Build a DeterministicVerdict from reasoning trace.
-        
+
         Args:
             ctx: Agent context
             prompt_spec: The prompt specification
-            evidence_bundle: Collected evidence
+            evidence_bundles: Collected evidence (single or list)
             reasoning_trace: The reasoning trace from auditor
             override_outcome: Override the preliminary outcome
             override_confidence: Override the confidence score
             override_rule_id: Override the resolution rule
-        
+
         Returns:
             DeterministicVerdict ready for settlement
         """
+        # Normalize to list
+        if isinstance(evidence_bundles, EvidenceBundle):
+            evidence_bundles = [evidence_bundles]
+
+        # Use first bundle for hashing/root computation
+        primary_bundle = evidence_bundles[0] if evidence_bundles else None
+
         # Determine outcome
         outcome = self._determine_outcome(
             prompt_spec,
             reasoning_trace,
             override_outcome,
         )
-        
+
         # Determine confidence
         confidence = self._determine_confidence(
             reasoning_trace,
             outcome,
             override_confidence,
         )
-        
+
         # Determine rule
         rule_id = self._determine_rule(
             prompt_spec,
@@ -99,26 +106,26 @@ class VerdictBuilder:
             outcome,
             override_rule_id,
         )
-        
+
         # Compute hashes
         prompt_spec_hash = self._compute_prompt_spec_hash(prompt_spec)
-        evidence_root = self._compute_evidence_root(evidence_bundle)
+        evidence_root = self._compute_evidence_root(primary_bundle) if primary_bundle else "0x" + "0" * 64
         reasoning_root = self._compute_reasoning_root(reasoning_trace)
-        
+
         # Generate justification
         justification = self._generate_justification(
             prompt_spec,
-            evidence_bundle,
+            evidence_bundles,
             reasoning_trace,
             outcome,
             confidence,
             rule_id,
         )
         justification_hash = self._hash_string(justification)
-        
+
         # Get selected evidence refs
         selected_leaf_refs = reasoning_trace.get_evidence_refs()
-        
+
         # Build verdict
         verdict = DeterministicVerdict(
             market_id=prompt_spec.market_id,
@@ -134,13 +141,14 @@ class VerdictBuilder:
             metadata={
                 "strict_mode": self.strict_mode,
                 "trace_id": reasoning_trace.trace_id,
-                "bundle_id": evidence_bundle.bundle_id,
+                "bundle_id": primary_bundle.bundle_id if primary_bundle else "empty",
+                "bundle_count": len(evidence_bundles),
                 "step_count": reasoning_trace.step_count,
                 "conflict_count": len(reasoning_trace.conflicts),
                 "justification": justification,
             },
         )
-        
+
         return verdict
     
     def _determine_outcome(
@@ -245,7 +253,7 @@ class VerdictBuilder:
     def _generate_justification(
         self,
         prompt_spec: PromptSpec,
-        evidence_bundle: EvidenceBundle,
+        evidence_bundles: list[EvidenceBundle],
         trace: ReasoningTrace,
         outcome: str,
         confidence: float,
@@ -253,24 +261,25 @@ class VerdictBuilder:
     ) -> str:
         """Generate human-readable justification."""
         parts = []
-        
+
         # Header
         parts.append(f"Market: {prompt_spec.market.question}")
         parts.append(f"Outcome: {outcome}")
         parts.append(f"Confidence: {confidence:.0%}")
         parts.append(f"Rule Applied: {rule_id}")
         parts.append("")
-        
+
         # Evidence summary
+        total_items = sum(len(b.items) for b in evidence_bundles)
         parts.append("Evidence Summary:")
-        parts.append(trace.evidence_summary or f"Analyzed {len(evidence_bundle.items)} evidence items.")
+        parts.append(trace.evidence_summary or f"Analyzed {total_items} evidence items from {len(evidence_bundles)} bundles.")
         parts.append("")
-        
+
         # Reasoning summary
         parts.append("Reasoning:")
         parts.append(trace.reasoning_summary or f"Completed {trace.step_count} reasoning steps.")
         parts.append("")
-        
+
         # Key conclusions from steps
         conclusions = [
             step.conclusion for step in trace.steps
@@ -280,7 +289,7 @@ class VerdictBuilder:
             parts.append("Key Conclusions:")
             for i, conclusion in enumerate(conclusions[:5], 1):
                 parts.append(f"  {i}. {conclusion}")
-        
+
         return "\n".join(parts)
     
     def _hash_string(self, s: str) -> str:
