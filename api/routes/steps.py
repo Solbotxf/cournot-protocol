@@ -151,8 +151,8 @@ class AuditRequest(BaseModel):
     prompt_spec: dict[str, Any] = Field(
         ..., description="Compiled prompt specification"
     )
-    evidence_bundle: dict[str, Any] = Field(
-        ..., description="Evidence bundle (from /step/collect)"
+    evidence_bundles: list[dict[str, Any]] = Field(
+        ..., description="Evidence bundles (from /step/collect)"
     )
     execution_mode: Literal["production", "development", "test"] = Field(
         default="development",
@@ -180,8 +180,8 @@ class JudgeRequest(BaseModel):
     prompt_spec: dict[str, Any] = Field(
         ..., description="Compiled prompt specification"
     )
-    evidence_bundle: dict[str, Any] = Field(
-        ..., description="Evidence bundle (from /step/collect)"
+    evidence_bundles: list[dict[str, Any]] = Field(
+        ..., description="Evidence bundles (from /step/collect)"
     )
     reasoning_trace: dict[str, Any] = Field(
         ..., description="Reasoning trace (from /step/audit)"
@@ -214,8 +214,8 @@ class BundleRequest(BaseModel):
     prompt_spec: dict[str, Any] = Field(
         ..., description="Compiled prompt specification"
     )
-    evidence_bundle: dict[str, Any] = Field(
-        ..., description="Evidence bundle (from /step/collect)"
+    evidence_bundles: list[dict[str, Any]] = Field(
+        ..., description="Evidence bundles (from /step/collect)"
     )
     reasoning_trace: dict[str, Any] = Field(
         ..., description="Reasoning trace (from /step/audit)"
@@ -448,21 +448,23 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
         except Exception as e:
             return AuditResponse(ok=False, errors=[f"Invalid prompt_spec: {e}"])
 
-        try:
-            evidence_bundle = EvidenceBundle(**request.evidence_bundle)
-        except Exception as e:
-            return AuditResponse(ok=False, errors=[f"Invalid evidence_bundle: {e}"])
+        evidence_bundles = []
+        for i, eb_dict in enumerate(request.evidence_bundles):
+            try:
+                evidence_bundles.append(EvidenceBundle(**eb_dict))
+            except Exception as e:
+                return AuditResponse(ok=False, errors=[f"Invalid evidence_bundle[{i}]: {e}"])
 
-        # Get context with LLM for auditor
+        if not evidence_bundles:
+            return AuditResponse(ok=False, errors=["No evidence bundles provided"])
+
         ctx = get_agent_context(with_llm=True)
 
-        # Select and run auditor agent
         from agents.auditor import get_auditor
-
         auditor = get_auditor(ctx)
         logger.info(f"Using auditor: {auditor.name}")
 
-        result = auditor.run(ctx, prompt_spec, evidence_bundle)
+        result = auditor.run(ctx, prompt_spec, evidence_bundles)
 
         if not result.success:
             return AuditResponse(ok=False, errors=[result.error or "Audit failed"])
@@ -499,10 +501,15 @@ async def run_judge(request: JudgeRequest) -> JudgeResponse:
         except Exception as e:
             return JudgeResponse(ok=False, errors=[f"Invalid prompt_spec: {e}"])
 
-        try:
-            evidence_bundle = EvidenceBundle(**request.evidence_bundle)
-        except Exception as e:
-            return JudgeResponse(ok=False, errors=[f"Invalid evidence_bundle: {e}"])
+        evidence_bundles = []
+        for i, eb_dict in enumerate(request.evidence_bundles):
+            try:
+                evidence_bundles.append(EvidenceBundle(**eb_dict))
+            except Exception as e:
+                return JudgeResponse(ok=False, errors=[f"Invalid evidence_bundle[{i}]: {e}"])
+
+        if not evidence_bundles:
+            return JudgeResponse(ok=False, errors=["No evidence bundles provided"])
 
         try:
             reasoning_trace = ReasoningTrace(**request.reasoning_trace)
@@ -518,7 +525,7 @@ async def run_judge(request: JudgeRequest) -> JudgeResponse:
         judge = get_judge(ctx)
         logger.info(f"Using judge: {judge.name}")
 
-        result = judge.run(ctx, prompt_spec, evidence_bundle, reasoning_trace)
+        result = judge.run(ctx, prompt_spec, evidence_bundles, reasoning_trace)
 
         if not result.success:
             return JudgeResponse(ok=False, errors=[result.error or "Judge failed"])
@@ -559,10 +566,18 @@ async def run_bundle(request: BundleRequest) -> BundleResponse:
         except Exception as e:
             return BundleResponse(ok=False, errors=[f"Invalid prompt_spec: {e}"])
 
-        try:
-            evidence_bundle = EvidenceBundle(**request.evidence_bundle)
-        except Exception as e:
-            return BundleResponse(ok=False, errors=[f"Invalid evidence_bundle: {e}"])
+        evidence_bundles = []
+        for i, eb_dict in enumerate(request.evidence_bundles):
+            try:
+                evidence_bundles.append(EvidenceBundle(**eb_dict))
+            except Exception as e:
+                return BundleResponse(ok=False, errors=[f"Invalid evidence_bundle[{i}]: {e}"])
+
+        if not evidence_bundles:
+            return BundleResponse(ok=False, errors=["No evidence bundles provided"])
+
+        # Use first bundle for PoR computation
+        evidence_bundle = evidence_bundles[0]
 
         try:
             reasoning_trace = ReasoningTrace(**request.reasoning_trace)
