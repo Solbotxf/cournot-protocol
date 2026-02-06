@@ -112,6 +112,10 @@ class CollectRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt)"
     )
+    collector: Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock"] = Field(
+        default="CollectorLLM",
+        description="Which collector agent to use (CollectorLLM, CollectorHyDE, CollectorHTTP, CollectorMock)",
+    )
     execution_mode: Literal["production", "development", "test"] = Field(
         default="development",
         description="Execution mode for agent selection",
@@ -126,6 +130,7 @@ class CollectResponse(BaseModel):
     """Response from evidence collection step."""
 
     ok: bool = Field(..., description="Whether collection succeeded")
+    collector_used: str | None = Field(default=None, description="Name of collector agent used")
     evidence_bundle: dict[str, Any] | None = Field(
         default=None, description="Collected evidence bundle"
     )
@@ -360,12 +365,19 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
 
     Collects evidence from sources specified in the tool_plan.
     This is step 1 of the resolution pipeline.
+
+    Specify `collector` to choose which collector agent to use:
+    - CollectorLLM (default): Uses LLM to interpret web content
+    - CollectorHyDE: Uses HyDE pattern for hypothesis-guided search
+    - CollectorHTTP: Direct HTTP requests
+    - CollectorMock: Mock data for testing
     """
     try:
-        logger.info("Running collect step...")
+        logger.info(f"Running collect step with collector: {request.collector}")
 
         from core.schemas.prompts import PromptSpec
         from core.schemas.transport import ToolPlan
+        from agents.registry import get_registry
 
         try:
             prompt_spec = PromptSpec(**request.prompt_spec)
@@ -380,16 +392,26 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
         # Get context with LLM + HTTP for collector
         ctx = get_agent_context(with_llm=True, with_http=True)
 
-        # Select and run collector agent
-        from agents.collector import get_collector
+        # Get specified collector from registry
+        registry = get_registry()
+        try:
+            collector = registry.get_agent_by_name(request.collector, ctx)
+        except ValueError as e:
+            return CollectResponse(
+                ok=False,
+                errors=[f"Collector not found: {request.collector}. Available: CollectorLLM, CollectorHyDE, CollectorHTTP, CollectorMock"],
+            )
 
-        collector = get_collector(ctx)
         logger.info(f"Using collector: {collector.name}")
 
         result = collector.run(ctx, prompt_spec, tool_plan)
 
         if not result.success:
-            return CollectResponse(ok=False, errors=[result.error or "Collection failed"])
+            return CollectResponse(
+                ok=False,
+                collector_used=collector.name,
+                errors=[result.error or "Collection failed"],
+            )
 
         evidence_bundle, execution_log = result.output
 
@@ -402,6 +424,7 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
 
         return CollectResponse(
             ok=True,
+            collector_used=collector.name,
             evidence_bundle=eb_dict,
             execution_log=execution_log.model_dump(mode="json") if execution_log else None,
         )
