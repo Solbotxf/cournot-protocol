@@ -74,6 +74,11 @@ class ResolveRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt output)"
     )
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock"]] = Field(
+        default=["CollectorLLM"],
+        description="Which collector agents to use (runs all in sequence)",
+        min_length=1,
+    )
     execution_mode: Literal["production", "development", "test"] = Field(
         default="development",
         description="Execution mode for agent selection",
@@ -290,70 +295,134 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
 
     Accepts prompt_spec and tool_plan from the /step/prompt output and runs
     all remaining pipeline steps to produce a final verdict.
+
+    Supports multiple collectors - runs each in sequence and combines evidence.
     """
     try:
-        logger.info("Running resolve step...")
+        logger.info(f"Running resolve step with collectors: {request.collectors}")
 
-        # Parse prompt_spec and tool_plan from request dicts
         from core.schemas.prompts import PromptSpec
         from core.schemas.transport import ToolPlan
+        from core.schemas.evidence import EvidenceBundle
+        from agents.registry import get_registry
+        from agents.auditor import get_auditor
+        from agents.judge import get_judge
+        from core.por.proof_of_reasoning import build_por_bundle, compute_roots
 
+        errors: list[str] = []
+
+        # Parse inputs
         try:
             prompt_spec = PromptSpec(**request.prompt_spec)
         except Exception as e:
-            return ResolveResponse(
-                ok=False,
-                errors=[f"Invalid prompt_spec: {e}"],
-            )
+            return ResolveResponse(ok=False, errors=[f"Invalid prompt_spec: {e}"])
 
         try:
             tool_plan = ToolPlan(**request.tool_plan)
         except Exception as e:
+            return ResolveResponse(ok=False, errors=[f"Invalid tool_plan: {e}"])
+
+        # Get context with LLM + HTTP
+        ctx = get_agent_context(with_llm=True, with_http=True)
+        registry = get_registry()
+
+        # Step 1: Run multiple collectors
+        evidence_bundles: list[EvidenceBundle] = []
+        collectors_used: list[str] = []
+
+        for collector_name in request.collectors:
+            try:
+                collector = registry.get_agent_by_name(collector_name, ctx)
+            except ValueError:
+                errors.append(f"Collector not found: {collector_name}")
+                continue
+
+            logger.info(f"Running collector: {collector.name}")
+            result = collector.run(ctx, prompt_spec, tool_plan)
+
+            if not result.success:
+                errors.append(f"{collector_name}: {result.error or 'Collection failed'}")
+                continue
+
+            bundle, _ = result.output
+            bundle.collector_name = collector.name
+            evidence_bundles.append(bundle)
+            collectors_used.append(collector.name)
+
+        if not evidence_bundles:
             return ResolveResponse(
                 ok=False,
-                errors=[f"Invalid tool_plan: {e}"],
+                errors=errors + ["No evidence collected from any collector"],
             )
 
-        # Create pipeline with LLM + HTTP enabled
-        pipeline = get_pipeline(
-            mode=request.execution_mode,
-            with_llm=True,
-            with_http=True,
-            enable_sentinel=False,
-        )
+        # Step 2: Run auditor
+        logger.info(f"Running auditor with {len(evidence_bundles)} bundles")
+        auditor = get_auditor(ctx)
+        audit_result = auditor.run(ctx, prompt_spec, evidence_bundles)
 
-        result = pipeline.run_from_prompt(prompt_spec, tool_plan)
+        if not audit_result.success:
+            return ResolveResponse(
+                ok=False,
+                errors=errors + [f"Audit failed: {audit_result.error}"],
+            )
+
+        reasoning_trace = audit_result.output
+
+        # Step 3: Run judge
+        logger.info("Running judge")
+        judge = get_judge(ctx)
+        judge_result = judge.run(ctx, prompt_spec, evidence_bundles, reasoning_trace)
+
+        if not judge_result.success:
+            return ResolveResponse(
+                ok=False,
+                errors=errors + [f"Judge failed: {judge_result.error}"],
+            )
+
+        verdict = judge_result.output
+
+        # Step 4: Build PoR bundle (use first evidence bundle for hashing)
+        logger.info("Building PoR bundle")
+        primary_bundle = evidence_bundles[0]
+        roots = compute_roots(prompt_spec, primary_bundle, reasoning_trace, verdict)
+        por_bundle = build_por_bundle(
+            prompt_spec,
+            primary_bundle,
+            reasoning_trace,
+            verdict,
+            include_por_root=True,
+            metadata={
+                "pipeline_version": "09A",
+                "mode": "api",
+                "collectors_used": collectors_used,
+            },
+        )
 
         # Build artifacts dict
         artifacts: dict[str, Any] = {}
 
-        # Include list of evidence bundles
-        if result.evidence_bundles:
-            evidence_bundles_data = []
-            for eb in result.evidence_bundles:
-                eb_dict = eb.model_dump(mode="json")
-                if not request.include_raw_content:
-                    for item in eb_dict.get("items", []):
-                        item["raw_content"] = None
-                        item["parsed_value"] = None
-                evidence_bundles_data.append(eb_dict)
-            artifacts["evidence_bundles"] = evidence_bundles_data
-
-        if result.audit_trace:
-            artifacts["reasoning_trace"] = result.audit_trace.model_dump(mode="json")
-        if result.verdict:
-            artifacts["verdict"] = result.verdict.model_dump(mode="json")
-        if result.por_bundle:
-            artifacts["por_bundle"] = result.por_bundle.model_dump(mode="json")
+        evidence_bundles_data = []
+        for eb in evidence_bundles:
+            eb_dict = eb.model_dump(mode="json")
+            if not request.include_raw_content:
+                for item in eb_dict.get("items", []):
+                    item["raw_content"] = None
+                    item["parsed_value"] = None
+            evidence_bundles_data.append(eb_dict)
+        artifacts["evidence_bundles"] = evidence_bundles_data
+        artifacts["collectors_used"] = collectors_used
+        artifacts["reasoning_trace"] = reasoning_trace.model_dump(mode="json")
+        artifacts["verdict"] = verdict.model_dump(mode="json")
+        artifacts["por_bundle"] = por_bundle.model_dump(mode="json")
 
         return ResolveResponse(
-            ok=result.ok,
-            market_id=result.verdict.market_id if result.verdict else None,
-            outcome=result.verdict.outcome if result.verdict else None,
-            confidence=result.verdict.confidence if result.verdict else None,
-            por_root=result.por_bundle.por_root if result.por_bundle else None,
-            artifacts=artifacts or None,
-            errors=list(result.errors) if result.errors else [],
+            ok=True,
+            market_id=verdict.market_id,
+            outcome=verdict.outcome,
+            confidence=verdict.confidence,
+            por_root=por_bundle.por_root,
+            artifacts=artifacts,
+            errors=errors,  # May have non-fatal collector errors
         )
 
     except Exception as e:
