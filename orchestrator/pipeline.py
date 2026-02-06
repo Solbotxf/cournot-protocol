@@ -142,11 +142,6 @@ class RunResult:
     errors: list[str] = field(default_factory=list)
 
     @property
-    def evidence_bundle(self) -> Optional[EvidenceBundle]:
-        """Backward compatible: returns first bundle or None."""
-        return self.evidence_bundles[0] if self.evidence_bundles else None
-
-    @property
     def market_id(self) -> Optional[str]:
         return self.verdict.market_id if self.verdict else None
 

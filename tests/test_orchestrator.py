@@ -277,7 +277,7 @@ class TestPipelineExecution:
         # Check all artifacts are populated
         assert result.prompt_spec is not None
         assert result.tool_plan is not None
-        assert result.evidence_bundle is not None
+        assert result.evidence_bundles  # non-empty list
         assert result.audit_trace is not None
         assert result.verdict is not None
 

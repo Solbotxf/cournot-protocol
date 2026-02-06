@@ -94,7 +94,7 @@ class ResolveResponse(BaseModel):
     por_root: str | None = Field(default=None, description="Proof of Reasoning root hash")
     artifacts: dict[str, Any] | None = Field(
         default=None,
-        description="Intermediate artifacts (evidence_bundle, reasoning_trace, verdict, por_bundle)",
+        description="Intermediate artifacts (evidence_bundles, reasoning_trace, verdict, por_bundle)",
     )
     errors: list[str] = Field(default_factory=list)
 
@@ -338,10 +338,6 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
                         item["parsed_value"] = None
                 evidence_bundles_data.append(eb_dict)
             artifacts["evidence_bundles"] = evidence_bundles_data
-
-            # Also include first bundle as evidence_bundle for backward compat
-            if evidence_bundles_data:
-                artifacts["evidence_bundle"] = evidence_bundles_data[0]
 
         if result.audit_trace:
             artifacts["reasoning_trace"] = result.audit_trace.model_dump(mode="json")
