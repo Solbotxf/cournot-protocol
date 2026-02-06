@@ -111,7 +111,17 @@ class EvidenceBundle(BaseModel):
     bundle_id: str = Field(..., description="Unique identifier for this bundle", min_length=1)
     market_id: str = Field(..., description="ID of the market this evidence is for", min_length=1)
     plan_id: str = Field(..., description="ID of the ToolPlan that was executed", min_length=1)
-    
+    collector_name: str | None = Field(
+        default=None,
+        description="Name of the collector agent that produced this bundle",
+    )
+    weight: float = Field(
+        default=1.0,
+        description="Weight for evidence aggregation (1.0 = equal weight)",
+        ge=0.0,
+        le=10.0,
+    )
+
     # Evidence items
     items: list[EvidenceItem] = Field(default_factory=list)
     

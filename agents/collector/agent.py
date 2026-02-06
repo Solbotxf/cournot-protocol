@@ -1166,7 +1166,7 @@ class CollectorHyDE(BaseAgent):
 
         ctx.debug(f"[Hypothesis] prompt {hypothesis_prompt}")
         response = ctx.llm.chat(messages)
-        ctx.debug(f"[Hypothesis] result {hypothesis_prompt}")
+        ctx.debug(f"[Hypothesis] result {response.content}")
         try:
             hypothesis_data = self._extract_json(response.content)
             hypothetical_doc = hypothesis_data.get("hypothetical_document", "")
@@ -1183,6 +1183,7 @@ class CollectorHyDE(BaseAgent):
             search_queries = [f"{semantics.target_entity} {semantics.predicate}"]
 
         ctx.info(f"HyDE generated {len(search_queries)} search queries")
+        ctx.debug(f"[Hypothesis] all search queries {search_queries}")
 
         # Step 2: Search for real sources using hypothesis-derived queries
         ctx.info("HyDE Step 2: Searching for real sources...")
@@ -1208,6 +1209,7 @@ class CollectorHyDE(BaseAgent):
 
         # Step 3: Synthesize real evidence by comparing to hypothesis
         ctx.info("HyDE Step 3: Synthesizing evidence...")
+        ctx.debug(f"[Hypothesis] search results {search_results}")
         current_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         # Format search results
