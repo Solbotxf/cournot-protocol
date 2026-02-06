@@ -324,15 +324,25 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
 
         result = pipeline.run_from_prompt(prompt_spec, tool_plan)
 
-        # Build artifacts dict; omit raw_content unless requested
+        # Build artifacts dict
         artifacts: dict[str, Any] = {}
-        if result.evidence_bundle:
-            eb = result.evidence_bundle.model_dump(mode="json")
-            if not request.include_raw_content:
-                for item in eb.get("items", []):
-                    item["raw_content"] = None
-                    item["parsed_value"] = None
-            artifacts["evidence_bundle"] = eb
+
+        # Include list of evidence bundles
+        if result.evidence_bundles:
+            evidence_bundles_data = []
+            for eb in result.evidence_bundles:
+                eb_dict = eb.model_dump(mode="json")
+                if not request.include_raw_content:
+                    for item in eb_dict.get("items", []):
+                        item["raw_content"] = None
+                        item["parsed_value"] = None
+                evidence_bundles_data.append(eb_dict)
+            artifacts["evidence_bundles"] = evidence_bundles_data
+
+            # Also include first bundle as evidence_bundle for backward compat
+            if evidence_bundles_data:
+                artifacts["evidence_bundle"] = evidence_bundles_data[0]
+
         if result.audit_trace:
             artifacts["reasoning_trace"] = result.audit_trace.model_dump(mode="json")
         if result.verdict:
