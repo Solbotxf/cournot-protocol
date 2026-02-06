@@ -1164,8 +1164,9 @@ class CollectorHyDE(BaseAgent):
             {"role": "user", "content": hypothesis_prompt},
         ]
 
+        ctx.debug(f"[Hypothesis] prompt {hypothesis_prompt}")
         response = ctx.llm.chat(messages)
-
+        ctx.debug(f"[Hypothesis] result {hypothesis_prompt}")
         try:
             hypothesis_data = self._extract_json(response.content)
             hypothetical_doc = hypothesis_data.get("hypothetical_document", "")

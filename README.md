@@ -41,7 +41,7 @@ User Question: "Will BTC be above $100k by end of 2025?"
     │
     ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  2. Collector                                                    │
+│  2. Collector*                                                   │
 │     Fetches evidence from data sources with receipts            │
 └─────────────────────────────────────────────────────────────────┘
     │
