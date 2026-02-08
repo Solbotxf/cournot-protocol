@@ -22,6 +22,9 @@ from .providers import (
     GrokProvider,
     MockProvider,
     create_provider,
+    PROVIDER_ENV_KEYS,
+    PROVIDER_DEFAULT_MODELS,
+    get_configured_providers,
 )
 
 def create_llm_client(
@@ -89,5 +92,8 @@ __all__ = [
     "GrokProvider",
     "MockProvider",
     "create_provider",
-    "create_llm_client"
+    "create_llm_client",
+    "PROVIDER_ENV_KEYS",
+    "PROVIDER_DEFAULT_MODELS",
+    "get_configured_providers",
 ]

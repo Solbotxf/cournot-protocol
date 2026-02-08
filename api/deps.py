@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
 from orchestrator.pipeline import Pipeline, PipelineConfig, ExecutionMode
 from agents import AgentContext
-from core.config.runtime import RuntimeConfig
+from core.config.runtime import LLMConfig, RuntimeConfig
+from core.llm.providers import PROVIDER_DEFAULT_MODELS, PROVIDER_ENV_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +59,52 @@ def _load_runtime_config() -> RuntimeConfig:
     return config.with_env_overrides()
 
 
+def build_llm_override(
+    llm_provider: str | None,
+    llm_model: str | None,
+) -> LLMConfig | None:
+    """Build an LLMConfig override from per-request provider/model.
+
+    API keys are ALWAYS resolved server-side from environment variables.
+    Returns None if no override requested (both args are None).
+
+    Raises:
+        InvalidRequestError: if provider is specified but has no API key configured.
+    """
+    if llm_provider is None and llm_model is None:
+        return None
+
+    # If only model is specified without provider, use the server default provider
+    if llm_provider is None:
+        config = _load_runtime_config()
+        llm_provider = config.llm.provider
+
+    # Resolve API key from environment
+    env_var = PROVIDER_ENV_KEYS.get(llm_provider.lower())
+    if env_var is None:
+        # Fall back to the generic pattern for unknown providers
+        env_var = f"{llm_provider.upper()}_API_KEY"
+
+    api_key = os.getenv(env_var)
+    if not api_key:
+        from api.errors import InvalidRequestError
+        raise InvalidRequestError(
+            f"Provider '{llm_provider}' is not configured on this server "
+            f"(missing {env_var} environment variable)"
+        )
+
+    return LLMConfig(
+        provider=llm_provider.lower(),
+        model=llm_model or PROVIDER_DEFAULT_MODELS.get(llm_provider.lower(), ""),
+        api_key=api_key,
+    )
+
+
 def get_agent_context(
     *,
     with_llm: bool = False,
     with_http: bool = False,
+    llm_override: LLMConfig | None = None,
 ) -> AgentContext:
     """
     Create an AgentContext with optional capabilities.
@@ -72,6 +116,7 @@ def get_agent_context(
     Args:
         with_llm: Enable LLM client
         with_http: Enable HTTP client for network requests
+        llm_override: Optional per-request LLM config override
 
     Returns:
         Configured AgentContext
@@ -86,6 +131,10 @@ def get_agent_context(
         )
 
     ctx = AgentContext.create(config)
+
+    # Apply per-request LLM override if provided
+    if llm_override is not None and with_llm:
+        ctx = ctx.with_llm_override(llm_override)
 
     # If LLM not requested, drop it so capability checks behave correctly
     if not with_llm:

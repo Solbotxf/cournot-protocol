@@ -20,7 +20,7 @@ from typing import Any, Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from api.deps import get_agent_context, get_pipeline
+from api.deps import get_agent_context, get_pipeline, build_llm_override
 from api.errors import InternalError, PipelineError
 
 from agents import AgentContext
@@ -47,6 +47,14 @@ class PromptEngineerRequest(BaseModel):
     strict_mode: bool = Field(
         default=True,
         description="Enable strict mode for deterministic hashing",
+    )
+    llm_provider: str | None = Field(
+        default=None,
+        description="Override LLM provider (e.g. 'openai', 'anthropic', 'grok'). Uses server default if omitted.",
+    )
+    llm_model: str | None = Field(
+        default=None,
+        description="Override LLM model (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Uses provider default if omitted.",
     )
 
 
@@ -86,6 +94,14 @@ class ResolveRequest(BaseModel):
     include_raw_content: bool = Field(
         default=False,
         description="Include raw_content in evidence_bundle items (omitted by default to reduce size)",
+    )
+    llm_provider: str | None = Field(
+        default=None,
+        description="Override LLM provider (e.g. 'openai', 'anthropic', 'grok'). Uses server default if omitted.",
+    )
+    llm_model: str | None = Field(
+        default=None,
+        description="Override LLM model (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Uses provider default if omitted.",
     )
 
 
@@ -130,6 +146,14 @@ class CollectRequest(BaseModel):
         default=False,
         description="Include raw_content in evidence items",
     )
+    llm_provider: str | None = Field(
+        default=None,
+        description="Override LLM provider (e.g. 'openai', 'anthropic', 'grok'). Uses server default if omitted.",
+    )
+    llm_model: str | None = Field(
+        default=None,
+        description="Override LLM model (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Uses provider default if omitted.",
+    )
 
 
 class CollectResponse(BaseModel):
@@ -163,6 +187,14 @@ class AuditRequest(BaseModel):
         default="development",
         description="Execution mode for agent selection",
     )
+    llm_provider: str | None = Field(
+        default=None,
+        description="Override LLM provider (e.g. 'openai', 'anthropic', 'grok'). Uses server default if omitted.",
+    )
+    llm_model: str | None = Field(
+        default=None,
+        description="Override LLM model (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Uses provider default if omitted.",
+    )
 
 
 class AuditResponse(BaseModel):
@@ -194,6 +226,14 @@ class JudgeRequest(BaseModel):
     execution_mode: Literal["production", "development", "test"] = Field(
         default="development",
         description="Execution mode for agent selection",
+    )
+    llm_provider: str | None = Field(
+        default=None,
+        description="Override LLM provider (e.g. 'openai', 'anthropic', 'grok'). Uses server default if omitted.",
+    )
+    llm_model: str | None = Field(
+        default=None,
+        description="Override LLM model (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Uses provider default if omitted.",
     )
 
 
@@ -257,9 +297,10 @@ async def run_prompt_engineer(request: PromptEngineerRequest) -> PromptEngineerR
     """
     try:
         logger.info(f"Compiling prompt: {request.user_input[:50]}...")
-        
-        ctx = get_agent_context(with_llm=True)
-        
+
+        override = build_llm_override(request.llm_provider, request.llm_model)
+        ctx = get_agent_context(with_llm=True, llm_override=override)
+
         # Use the LLM agent for prompt compilation
         from agents.prompt_engineer import PromptEngineerLLM
 
@@ -323,7 +364,8 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
             return ResolveResponse(ok=False, errors=[f"Invalid tool_plan: {e}"])
 
         # Get context with LLM + HTTP
-        ctx = get_agent_context(with_llm=True, with_http=True)
+        override = build_llm_override(request.llm_provider, request.llm_model)
+        ctx = get_agent_context(with_llm=True, with_http=True, llm_override=override)
         registry = get_registry()
 
         # Step 1: Run multiple collectors
@@ -456,7 +498,8 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
         except Exception as e:
             return CollectResponse(ok=False, errors=[f"Invalid tool_plan: {e}"])
 
-        ctx = get_agent_context(with_llm=True, with_http=True)
+        override = build_llm_override(request.llm_provider, request.llm_model)
+        ctx = get_agent_context(with_llm=True, with_http=True, llm_override=override)
         registry = get_registry()
 
         bundles = []
@@ -533,7 +576,8 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
         if not evidence_bundles:
             return AuditResponse(ok=False, errors=["No evidence bundles provided"])
 
-        ctx = get_agent_context(with_llm=True)
+        override = build_llm_override(request.llm_provider, request.llm_model)
+        ctx = get_agent_context(with_llm=True, llm_override=override)
 
         from agents.auditor import get_auditor
         auditor = get_auditor(ctx)
@@ -592,7 +636,8 @@ async def run_judge(request: JudgeRequest) -> JudgeResponse:
             return JudgeResponse(ok=False, errors=[f"Invalid reasoning_trace: {e}"])
 
         # Get context with LLM for judge
-        ctx = get_agent_context(with_llm=True)
+        override = build_llm_override(request.llm_provider, request.llm_model)
+        ctx = get_agent_context(with_llm=True, llm_override=override)
 
         # Select and run judge agent
         from agents.judge import get_judge

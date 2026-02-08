@@ -16,7 +16,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import health, run, verify, replay, steps
+from api.routes import health, run, verify, replay, steps, capabilities
 from api.errors import APIError, api_error_handler, generic_error_handler
 
 
@@ -56,6 +56,7 @@ HTTP API for the Cournot prediction market resolution protocol.
 - **POST /run** - Execute the full pipeline on a query
 - **POST /verify** - Verify an uploaded artifact pack
 - **POST /replay** - Replay evidence and verify against original
+- **GET /capabilities** - Discover available agents and configured LLM providers
 - **GET /health** - Health check
 
 ## Response Formats
@@ -94,7 +95,8 @@ The `/run` endpoint supports two response formats:
     app.include_router(verify.router)
     app.include_router(replay.router)
     app.include_router(steps.router)
-    
+    app.include_router(capabilities.router)
+
     return app
 
 

@@ -18,6 +18,32 @@ from .client import LLMResponse
 from .determinism import DecodingPolicy, policy_to_provider_args
 
 
+# Canonical mapping from provider name to environment variable for API key.
+PROVIDER_ENV_KEYS: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "grok": "XAI_API_KEY",
+}
+
+# Default models per provider (mirrors factory defaults in create_provider).
+PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "openai": "gpt-4o",
+    "anthropic": "claude-sonnet-4-20250514",
+    "google": "gemini-1.5-pro",
+    "grok": "grok-4-latest",
+}
+
+
+def get_configured_providers() -> list[dict[str, str]]:
+    """Return providers that have API keys set in the environment."""
+    return [
+        {"provider": name, "default_model": PROVIDER_DEFAULT_MODELS.get(name, "")}
+        for name, env_var in PROVIDER_ENV_KEYS.items()
+        if os.getenv(env_var)
+    ]
+
+
 class LLMProvider(ABC):
     """
     Abstract base class for LLM providers.
