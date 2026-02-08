@@ -376,8 +376,9 @@ def _register_agents() -> None:
         factory=lambda ctx: AuditorLLM(),
         capabilities={AgentCapability.LLM},
         priority=100,  # Primary
+        metadata={"description": "LLM-powered auditor that performs deep semantic reasoning over evidence. Analyzes source credibility, identifies conflicts, and produces a structured reasoning trace."},
     )
-    
+
     register_agent(
         step=AgentStep.AUDITOR,
         name="AuditorRuleBased",
@@ -385,6 +386,7 @@ def _register_agents() -> None:
         capabilities={AgentCapability.DETERMINISTIC, AgentCapability.REPLAY},
         priority=50,  # Fallback
         is_fallback=True,
+        metadata={"description": "Deterministic rule-based auditor. Applies predefined rules to evidence without LLM. Fully reproducible and suitable for replay verification."},
     )
 
 

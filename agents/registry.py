@@ -255,7 +255,6 @@ def register_agent(
     """
     get_registry().register(step, name, factory, **kwargs)
 
-
 def get_agent(
     step: AgentStep,
     ctx: "AgentContext",

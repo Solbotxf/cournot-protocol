@@ -226,6 +226,7 @@ def _register_agents() -> None:
         factory=lambda ctx: PromptEngineerLLM(),
         capabilities={AgentCapability.LLM},
         priority=100,
+        metadata={"description": "LLM-powered prompt compiler that converts natural language market queries into structured PromptSpec and ToolPlan for the resolution pipeline."},
     )
 
 

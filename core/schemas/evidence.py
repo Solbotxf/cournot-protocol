@@ -22,6 +22,32 @@ from .versioning import SCHEMA_VERSION
 ProvenanceTier = Literal[0, 1, 2, 3, 4]
 
 
+class EvidenceSource(BaseModel):
+    """
+    A single source cited in collected evidence.
+
+    Standardized across all collectors so frontends can parse
+    evidence_sources consistently.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    url: str = Field(..., description="URL of the source")
+    source_id: str | None = Field(default=None, description="Short identifier (e.g. '[1]')")
+    credibility_tier: int = Field(
+        default=3,
+        description="Credibility tier: 1=authoritative, 2=reputable, 3=low-confidence",
+        ge=1,
+        le=3,
+    )
+    key_fact: str = Field(default="", description="Key fact or quote extracted from this source")
+    supports: str = Field(
+        default="N/A",
+        description="Whether this source supports resolution: YES, NO, or N/A",
+    )
+    date_published: str | None = Field(default=None, description="Publication date (YYYY-MM-DD)")
+
+
 class Provenance(BaseModel):
     """
     Provenance metadata for a piece of evidence.

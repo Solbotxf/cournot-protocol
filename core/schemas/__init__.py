@@ -89,6 +89,7 @@ from .evidence import (
     CollectionResult,
     EvidenceBundle,
     EvidenceItem,
+    EvidenceSource,
     Provenance,
     ProvenanceTier,
 )
@@ -193,6 +194,7 @@ __all__ = [
     # Evidence
     "EvidenceBundle",
     "EvidenceItem",
+    "EvidenceSource",
     "SourceDescriptor",
     "RetrievalReceipt",
     "ProvenanceProof",

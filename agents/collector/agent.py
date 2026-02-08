@@ -383,8 +383,10 @@ You MUST return a single, valid JSON object. Do not include markdown formatting 
         {
             "source_id": "[X]",
             "url": "...",
-            "credibility_tier": "Tier 1/Tier 2/Tier 3",
-            "relevance_reason": "Briefly explain why this source was selected (e.g. 'Official government statement dated yesterday')."
+            "credibility_tier": 1 or 2 or 3 (integer: 1=authoritative, 2=reputable mainstream, 3=low confidence),
+            "key_fact": "The specific fact extracted from this source",
+            "supports": "YES" or "NO" or "N/A",
+            "date_published": "YYYY-MM-DD" or null
         }
     ]
 }
@@ -747,15 +749,15 @@ class CollectorLLM(BaseAgent):
                     content = content[4:]
 
             data = json.loads(content)
-            
-            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!! getting result data", data)
 
-            # Map the new schema to EvidenceItem
-            # Store evidence_sources and metadata in extracted_fields
+            # Normalize evidence_sources to standard format
+            raw_sources = data.get("evidence_sources", [])
+            evidence_sources = _normalize_evidence_sources(raw_sources)
+
             extracted_fields = {
                 "confidence_score": data.get("confidence_score"),
                 "resolution_status": data.get("resolution_status"),
-                "evidence_sources": data.get("evidence_sources", []),
+                "evidence_sources": evidence_sources,
             }
 
             # Determine success based on resolution_status
@@ -997,9 +999,10 @@ Return a single valid JSON object (no markdown):
         {
             "source_id": "[X]",
             "url": "...",
-            "credibility_tier": "Tier 1/Tier 2/Tier 3",
-            "supports_hypothesis": true/false,
-            "key_fact": "The specific fact extracted from this source"
+            "credibility_tier": 1 or 2 or 3 (integer: 1=authoritative, 2=reputable mainstream, 3=low confidence),
+            "key_fact": "The specific fact extracted from this source",
+            "supports": "YES" or "NO" or "N/A",
+            "date_published": "YYYY-MM-DD" or null
         }
     ],
     "discrepancies": ["Any differences between hypothesis and reality"]
@@ -1266,10 +1269,24 @@ class CollectorHyDE(BaseAgent):
             # Determine success based on hypothesis match and confidence
             success = hypothesis_match in ("CONFIRMED", "PARTIAL") and confidence_score >= 0.5
 
+            # Map hypothesis_match to standard resolution_status
+            _MATCH_TO_STATUS = {
+                "CONFIRMED": "RESOLVED",
+                "PARTIAL": "AMBIGUOUS",
+                "CONTRADICTED": "AMBIGUOUS",
+                "UNVERIFIED": "UNRESOLVED",
+            }
+            resolution_status = _MATCH_TO_STATUS.get(hypothesis_match, "UNRESOLVED")
+
+            # Normalize evidence_sources to standard format
+            raw_sources = data.get("evidence_sources", [])
+            evidence_sources = _normalize_evidence_sources(raw_sources)
+
             extracted_fields = {
-                "hypothesis_match": hypothesis_match,
                 "confidence_score": confidence_score,
-                "evidence_sources": data.get("evidence_sources", []),
+                "resolution_status": resolution_status,
+                "evidence_sources": evidence_sources,
+                "hypothesis_match": hypothesis_match,
                 "discrepancies": data.get("discrepancies", []),
                 "hypothetical_document": hypothetical_doc[:300],
             }
@@ -1422,9 +1439,893 @@ class CollectorHyDE(BaseAgent):
         return hashlib.sha256(content.encode()).hexdigest()
 
 
+# =============================================================================
+# Agentic RAG System Prompts
+# =============================================================================
+
+AGENTIC_QUERY_PLANNER_SYSTEM_PROMPT = """
+You are a Retrieval Strategist for a prediction market resolution oracle.
+Given a data requirement, market question, and optionally previous gaps, produce a retrieval blueprint.
+
+### RULES
+1. Generate 2-4 diverse search queries (broad, specific, forensic).
+2. Include domain hints for authoritative sources when applicable.
+3. Include temporal hints when the requirement is time-sensitive.
+4. If previous_gaps are provided, generate queries that specifically address those gaps.
+5. Do NOT hallucinate facts — you are only planning queries, not answering the question.
+
+### OUTPUT FORMAT
+Return ONLY a single valid JSON object (no markdown, no commentary):
+{
+    "sub_questions": ["question the requirement decomposes into..."],
+    "queries": ["search query 1", "search query 2", ...],
+    "domain_hints": ["site:cdc.gov", ...],
+    "recency_hint": "prefer last N days" or null,
+    "must_have_terms": ["term1", ...],
+    "avoid_terms": ["term1", ...]
+}
+"""
+
+AGENTIC_RELEVANCE_ASSESSOR_SYSTEM_PROMPT = """
+You are a Relevance & Credibility Assessor for a prediction market resolution oracle.
+You receive a fetched web page fragment and must assess its relevance to a specific data requirement.
+
+### RULES
+1. Compare DATE_PUBLISHED (if present) against CURRENT_TIME. Outdated content is less relevant.
+2. Assess credibility tier:
+   - Tier 1: Official government (.gov), primary company releases, wire services (Reuters, AP, Bloomberg)
+   - Tier 2: Reputable mainstream news (NYT, BBC, WSJ, major outlets)
+   - Tier 3: Blogs, opinion pieces, social media, tabloids, undated sources
+3. Determine if the content actually entails (proves/disproves) the requirement.
+4. Extract the most relevant quote and any parseable value.
+5. You MUST NOT hallucinate information not present in the fragment.
+6. You MUST NOT invent URLs, dates, or facts.
+
+### OUTPUT FORMAT
+Return ONLY a single valid JSON object (no markdown, no commentary):
+{
+    "url": "the URL being assessed",
+    "is_relevant": true or false,
+    "entails_requirement": true or false,
+    "credibility_tier": 1 or 2 or 3,
+    "date_published": "YYYY-MM-DD" or null,
+    "key_quote": "short excerpt from the text that supports assessment",
+    "extracted_fields": {},
+    "parsed_value": "extracted answer value or null",
+    "reason": "brief explanation of why relevant or irrelevant",
+    "confidence": 0.0 to 1.0
+}
+"""
+
+AGENTIC_SYNTHESIS_SYSTEM_PROMPT = """
+You are the Chief Evidence Synthesizer for a prediction market resolution oracle.
+You receive a set of assessed evidence fragments and must fuse them into a single coherent resolution.
+
+### RULES
+1. **Source Hierarchy:** Tier 1 overrides Tier 2; Tier 2 overrides Tier 3.
+   If same-tier sources conflict, the most recent one prevails.
+2. **Temporal Awareness:** Compare dates against CURRENT_TIME. Recent evidence is preferred.
+3. **Conflict Handling:** If sources conflict, document both sides. Keep opposing sources for transparency.
+4. **Grounding:** You MUST NOT introduce facts not present in the assessed evidence.
+   Every claim must cite a source URL from the input.
+5. **Parsimony:** Provide the simplest conclusion supported by the strongest evidence.
+
+### OUTPUT FORMAT
+Return ONLY a single valid JSON object (no markdown, no commentary):
+{
+    "resolution_status": "RESOLVED" or "AMBIGUOUS" or "UNRESOLVED",
+    "parsed_value": "the specific answer extracted or null",
+    "confidence_score": 0.0 to 1.0,
+    "evidence_sources": [
+        {
+            "url": "...",
+            "credibility_tier": 1 or 2 or 3 (integer: 1=authoritative, 2=reputable mainstream, 3=low confidence),
+            "key_fact": "...",
+            "supports": "YES" or "NO" or "N/A",
+            "date_published": "YYYY-MM-DD" or null
+        }
+    ],
+    "conflicts": ["description of any conflicts between sources"],
+    "missing_info": ["information still needed to fully resolve"],
+    "reasoning_trace": "Step-by-step deduction: 1) ... 2) ... 3) ... Conclusion: ..."
+}
+"""
+
+
+class CollectorAgenticRAG(BaseAgent):
+    """
+    Agentic RAG (Retrieval-Augmented Generation) Collector with deep reasoning.
+
+    Implements iterative retrieval↔reasoning loops inspired by the "agentic RAG
+    with deep reasoning" paradigm:
+
+    1. **Query Planning** — LLM generates a retrieval blueprint with sub-questions,
+       targeted queries, domain hints, and temporal constraints.
+    2. **Retrieve Candidates** — Serper API search with global URL de-duplication.
+    3. **Fetch & Extract** — HTTP fetch of top candidate pages, extract fragments.
+    4. **Relevance Assessment** — LLM assesses each fragment for relevance,
+       credibility tier, entailment, and confidence (integration enhancement).
+    5. **Synthesis & Fusion** — LLM fuses filtered evidence into a coherent,
+       conflict-aware result with structured provenance (integration enhancement).
+    6. **Iterate** — If evidence is insufficient or conflicting, feed gaps back
+       into query planning for another retrieval round.
+
+    This produces higher-quality, more trustworthy evidence bundles than single-pass
+    collectors by interleaving retrieval and reasoning.
+    """
+
+    _name = "CollectorAgenticRAG"
+    _version = "v1"
+    _capabilities = {AgentCapability.LLM, AgentCapability.NETWORK}
+
+    MAX_ITERS = 2
+    TOP_K_FETCH = 5
+    KEEP_K = 2
+    MAX_RETRIES = 2
+    MAX_FRAGMENT_BYTES = 15_000  # ~15 KB per page fragment
+
+    def run(
+        self,
+        ctx: "AgentContext",
+        prompt_spec: PromptSpec,
+        tool_plan: ToolPlan,
+    ) -> AgentResult:
+        """Execute agentic RAG collection with iterative retrieval↔reasoning."""
+        if ctx.llm is None:
+            return AgentResult.failure(error="LLM client not available")
+        if ctx.http is None:
+            return AgentResult.failure(error="HTTP client not available")
+
+        ctx.info(f"CollectorAgenticRAG executing plan {tool_plan.plan_id}")
+
+        bundle = EvidenceBundle(
+            bundle_id=f"agentic_rag_{tool_plan.plan_id}",
+            market_id=prompt_spec.market_id,
+            plan_id=tool_plan.plan_id,
+        )
+
+        execution_log = ToolExecutionLog(
+            plan_id=tool_plan.plan_id,
+            started_at=ctx.now().isoformat(),
+        )
+
+        for req_id in tool_plan.requirements:
+            requirement = prompt_spec.get_requirement_by_id(req_id)
+            if not requirement:
+                continue
+
+            ctx.info(f"AgenticRAG processing requirement: {req_id}")
+            evidence = self._collect_requirement(
+                ctx, requirement, prompt_spec, execution_log,
+            )
+            bundle.add_item(evidence)
+
+        bundle.collected_at = ctx.now()
+        bundle.requirements_fulfilled = [
+            req_id for req_id in tool_plan.requirements
+            if any(e.requirement_id == req_id and e.success for e in bundle.items)
+        ]
+        bundle.requirements_unfulfilled = [
+            req_id for req_id in tool_plan.requirements
+            if req_id not in bundle.requirements_fulfilled
+        ]
+        execution_log.ended_at = ctx.now().isoformat()
+
+        return AgentResult(
+            output=(bundle, execution_log),
+            verification=self._validate_output(bundle, tool_plan),
+            receipts=ctx.get_receipt_refs(),
+            success=bundle.has_evidence,
+            error=None if bundle.has_evidence else "No evidence collected",
+            metadata={
+                "collector": "agentic_rag",
+                "bundle_id": bundle.bundle_id,
+                "items_collected": len(bundle.items),
+                "requirements_fulfilled": bundle.requirements_fulfilled,
+                "requirements_unfulfilled": bundle.requirements_unfulfilled,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Core iterative loop for a single requirement
+    # ------------------------------------------------------------------
+
+    def _collect_requirement(
+        self,
+        ctx: "AgentContext",
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        execution_log: ToolExecutionLog,
+    ) -> EvidenceItem:
+        """Run the iterative agentic RAG loop for one requirement."""
+        req_id = requirement.requirement_id
+        market_id = prompt_spec.market_id
+        semantics = prompt_spec.prediction_semantics
+        event_def = prompt_spec.market.event_definition
+        assumptions_list = prompt_spec.extra.get("assumptions", [])
+        assumptions_str = (
+            "\n".join([f"- {a}" for a in assumptions_list])
+            if assumptions_list else "None"
+        )
+        current_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        global_seen_urls: set[str] = set()
+        previous_gaps: list[str] = []
+        last_synthesis: dict[str, Any] | None = None
+
+        for iteration in range(self.MAX_ITERS):
+            ctx.info(f"AgenticRAG iteration {iteration + 1}/{self.MAX_ITERS} for {req_id}")
+            evidence_id = hashlib.sha256(
+                f"agentic:{req_id}:{iteration}:{market_id}".encode()
+            ).hexdigest()[:16]
+
+            # ── Step A: Query planning ──────────────────────────────
+            plan = self._plan_queries(
+                ctx, requirement, prompt_spec, semantics, event_def,
+                assumptions_str, current_time_str, previous_gaps, execution_log,
+            )
+            queries = plan.get("queries", [])[:4]
+            domain_hints = plan.get("domain_hints", [])
+
+            # Append domain-hinted queries
+            for hint in domain_hints[:2]:
+                if queries:
+                    queries.append(f"{queries[0]} {hint}")
+
+            if not queries:
+                queries = [f"{semantics.target_entity} {semantics.predicate}"]
+
+            print(f"========================planning the queries: {queries}")
+            # ── Step B: Retrieve candidates via Serper ───────────────
+            search_results = self._execute_search_queries(
+                ctx, queries, global_seen_urls, execution_log,
+            )
+
+            print(f"========================search results: {search_results}")
+            if not search_results:
+                if iteration == 0:
+                    return EvidenceItem(
+                        evidence_id=evidence_id,
+                        requirement_id=req_id,
+                        provenance=Provenance(
+                            source_id="agentic_rag",
+                            source_uri="serper:search",
+                            tier=2,
+                            fetched_at=ctx.now(),
+                        ),
+                        success=False,
+                        error="No search results found (Serper API may not be configured)",
+                    )
+                # Later iterations: use whatever we have from prior iteration
+                break
+
+            # ── Step C: Fetch pages and extract fragments ────────────
+            fragments = self._fetch_pages(
+                ctx, search_results[:self.TOP_K_FETCH], execution_log,
+            )
+
+            if not fragments:
+                previous_gaps.append("All fetched pages returned errors or empty content")
+                continue
+
+            # ── Step D: Relevance assessment & filtering ─────────────
+            assessed = self._assess_relevance(
+                ctx, fragments, requirement, prompt_spec,
+                current_time_str, execution_log,
+            )
+
+            # Filter: keep relevant items with entailment or sufficient confidence
+            kept = [
+                a for a in assessed
+                if a.get("is_relevant") and (
+                    a.get("entails_requirement") or a.get("confidence", 0) >= 0.6
+                )
+            ]
+
+            # Prefer higher tiers, then by confidence
+            kept.sort(
+                key=lambda a: (
+                    -(a.get("credibility_tier", 3)),  # lower tier number = better
+                    -(a.get("confidence", 0)),
+                ),
+            )
+
+            # If conflicts exist, ensure we keep at least 2 opposing sources
+            if len(kept) > self.KEEP_K:
+                kept = kept[:self.KEEP_K]
+
+            if not kept:
+                previous_gaps.append("All fetched sources were irrelevant after assessment")
+                continue
+
+            # ── Step E: Synthesis & fusion ────────────────────────────
+            synthesis = self._synthesize(
+                ctx, kept, requirement, prompt_spec,
+                current_time_str, execution_log,
+            )
+            last_synthesis = synthesis
+
+            # ── Step F: Decide whether to iterate ────────────────────
+            status = synthesis.get("resolution_status", "UNRESOLVED")
+            confidence = synthesis.get("confidence_score", 0.0)
+            missing = synthesis.get("missing_info", [])
+
+            if status == "RESOLVED" and confidence >= 0.6:
+                ctx.info(f"AgenticRAG resolved {req_id} with confidence {confidence}")
+                break
+
+            if status == "AMBIGUOUS" and confidence >= 0.5:
+                ctx.info(f"AgenticRAG ambiguous {req_id} with confidence {confidence}")
+                break
+
+            # Feed gaps back for next iteration
+            previous_gaps = list(missing) if missing else [
+                f"Status {status} with low confidence {confidence}"
+            ]
+
+        # ── Build final EvidenceItem from last synthesis ──────────────
+        if last_synthesis is None:
+            evidence_id = hashlib.sha256(
+                f"agentic:{req_id}:final:{market_id}".encode()
+            ).hexdigest()[:16]
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=req_id,
+                provenance=Provenance(
+                    source_id="agentic_rag",
+                    source_uri="serper:search+http:fetch",
+                    tier=2,
+                    fetched_at=ctx.now(),
+                ),
+                success=False,
+                error="AgenticRAG failed to produce synthesis after all iterations",
+            )
+
+        return self._build_evidence_from_synthesis(
+            ctx, req_id, market_id, last_synthesis,
+        )
+
+    # ------------------------------------------------------------------
+    # Step A: Query planning
+    # ------------------------------------------------------------------
+
+    def _plan_queries(
+        self,
+        ctx: "AgentContext",
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        semantics: Any,
+        event_def: str,
+        assumptions_str: str,
+        current_time_str: str,
+        previous_gaps: list[str],
+        execution_log: ToolExecutionLog,
+    ) -> dict[str, Any]:
+        """Generate a retrieval blueprint via LLM."""
+        call_record = ToolCallRecord(
+            tool="agentic_rag:plan",
+            input={
+                "requirement_id": requirement.requirement_id,
+                "iteration_gaps": previous_gaps,
+            },
+            started_at=ctx.now().isoformat(),
+        )
+
+        gaps_text = ""
+        if previous_gaps:
+            gaps_text = (
+                f"\n### PREVIOUS GAPS (address these specifically)\n"
+                + "\n".join(f"- {g}" for g in previous_gaps)
+            )
+
+        prompt = (
+            f"Generate a retrieval blueprint for this data requirement:\n"
+            f"- Requirement: {requirement.description}\n"
+            f"- Market question: {prompt_spec.market.question}\n"
+            f"- Event Definition: {event_def}\n"
+            f"- Key Assumptions:\n{assumptions_str}\n"
+            f"- Entity: {semantics.target_entity}\n"
+            f"- Predicate: {semantics.predicate}\n"
+            f"- Threshold: {semantics.threshold or 'N/A'}\n"
+            f"- Current UTC time: {current_time_str}\n"
+            f"{gaps_text}"
+        )
+
+        messages = [
+            {"role": "system", "content": AGENTIC_QUERY_PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        response = ctx.llm.chat(messages)
+
+        try:
+            plan = self._extract_json(response.content)
+        except (json.JSONDecodeError, ValueError):
+            plan = {
+                "queries": [f"{semantics.target_entity} {semantics.predicate}"],
+                "domain_hints": [],
+            }
+
+        call_record.ended_at = ctx.now().isoformat()
+        call_record.output = {"queries": plan.get("queries", [])[:4]}
+        execution_log.add_call(call_record)
+        return plan
+
+    # ------------------------------------------------------------------
+    # Step B: Search via Serper
+    # ------------------------------------------------------------------
+
+    def _execute_search_queries(
+        self,
+        ctx: "AgentContext",
+        queries: list[str],
+        global_seen_urls: set[str],
+        execution_log: ToolExecutionLog,
+    ) -> list[dict[str, str]]:
+        """Execute search queries via Serper API with global de-dupe."""
+        api_key = os.getenv("SERPER_API_KEY", "").strip()
+        if ctx.config and hasattr(ctx.config, "serper") and ctx.config.serper:
+            api_key = (ctx.config.serper.api_key or "").strip() or api_key
+
+        if not api_key or not ctx.http:
+            ctx.warning("Serper API not configured for agentic RAG")
+            return []
+
+        all_results: list[dict[str, str]] = []
+
+        for query in queries:
+            call_record = ToolCallRecord(
+                tool="agentic_rag:search",
+                input={"query": query},
+                started_at=ctx.now().isoformat(),
+            )
+            try:
+                response = ctx.http.post(
+                    "https://google.serper.dev/search",
+                    headers={
+                        "X-API-KEY": api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"q": query},
+                    timeout=30.0,
+                )
+                if not response.ok:
+                    call_record.ended_at = ctx.now().isoformat()
+                    call_record.error = f"HTTP {response.status_code}"
+                    execution_log.add_call(call_record)
+                    continue
+
+                data = response.json()
+                results_found = 0
+                for item in data.get("organic", [])[:7]:
+                    url = item.get("link", "")
+                    if url and url not in global_seen_urls:
+                        global_seen_urls.add(url)
+                        all_results.append({
+                            "title": item.get("title", ""),
+                            "snippet": item.get("snippet", ""),
+                            "url": url,
+                            "date": item.get("date", ""),
+                        })
+                        results_found += 1
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {"results_found": results_found}
+                execution_log.add_call(call_record)
+
+            except Exception as e:
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.error = str(e)
+                execution_log.add_call(call_record)
+
+        return all_results
+
+    # ------------------------------------------------------------------
+    # Step C: Fetch pages
+    # ------------------------------------------------------------------
+
+    def _fetch_pages(
+        self,
+        ctx: "AgentContext",
+        candidates: list[dict[str, str]],
+        execution_log: ToolExecutionLog,
+    ) -> list[dict[str, Any]]:
+        """Fetch top candidate URLs and extract compact fragments."""
+        fragments: list[dict[str, Any]] = []
+
+        for candidate in candidates:
+            url = candidate["url"]
+            call_record = ToolCallRecord(
+                tool="agentic_rag:fetch",
+                input={"url": url},
+                started_at=ctx.now().isoformat(),
+            )
+            try:
+                response = ctx.http.get(url, timeout=20.0)
+                status_code = response.status_code
+
+                if not response.ok:
+                    call_record.ended_at = ctx.now().isoformat()
+                    call_record.error = f"HTTP {status_code}"
+                    call_record.output = {"status_code": status_code}
+                    execution_log.add_call(call_record)
+                    continue
+
+                raw_text = response.text[:self.MAX_FRAGMENT_BYTES]
+                content_hash = self._hash_content(raw_text)
+
+                fragments.append({
+                    "url": url,
+                    "title": candidate.get("title", ""),
+                    "snippet": candidate.get("snippet", ""),
+                    "date": candidate.get("date", ""),
+                    "fragment": raw_text,
+                    "content_hash": content_hash,
+                    "status_code": status_code,
+                })
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {
+                    "status_code": status_code,
+                    "content_hash": content_hash,
+                    "fragment_length": len(raw_text),
+                }
+                execution_log.add_call(call_record)
+
+            except Exception as e:
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.error = str(e)
+                execution_log.add_call(call_record)
+
+        return fragments
+
+    # ------------------------------------------------------------------
+    # Step D: Relevance assessment
+    # ------------------------------------------------------------------
+
+    def _assess_relevance(
+        self,
+        ctx: "AgentContext",
+        fragments: list[dict[str, Any]],
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        current_time_str: str,
+        execution_log: ToolExecutionLog,
+    ) -> list[dict[str, Any]]:
+        """Assess each fragment for relevance and credibility via LLM."""
+        assessments: list[dict[str, Any]] = []
+
+        for frag in fragments:
+            call_record = ToolCallRecord(
+                tool="agentic_rag:assess",
+                input={"url": frag["url"]},
+                started_at=ctx.now().isoformat(),
+            )
+
+            # Truncate fragment for the LLM prompt
+            truncated_fragment = frag["fragment"][:8000]
+
+            prompt = (
+                f"### CONTEXT\n"
+                f"CURRENT_TIME: {current_time_str}\n"
+                f"Market Question: {prompt_spec.market.question}\n"
+                f"Data Requirement: {requirement.description}\n\n"
+                f"### WEB PAGE FRAGMENT\n"
+                f"URL: {frag['url']}\n"
+                f"TITLE: {frag.get('title', 'Unknown')}\n"
+                f"DATE_FROM_SEARCH: {frag.get('date', 'Unknown')}\n"
+                f"SNIPPET: {frag.get('snippet', '')}\n\n"
+                f"CONTENT:\n{truncated_fragment}\n\n"
+                f"### TASK\n"
+                f"Assess this page's relevance and credibility for the data requirement above."
+            )
+
+            messages = [
+                {"role": "system", "content": AGENTIC_RELEVANCE_ASSESSOR_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+
+            try:
+                response = ctx.llm.chat(messages)
+                assessment = self._extract_json(response.content)
+                assessment["url"] = frag["url"]  # ensure URL is correct
+                assessment["content_hash"] = frag.get("content_hash", "")
+                assessments.append(assessment)
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {
+                    "is_relevant": assessment.get("is_relevant"),
+                    "credibility_tier": assessment.get("credibility_tier"),
+                    "confidence": assessment.get("confidence"),
+                }
+                execution_log.add_call(call_record)
+
+            except (json.JSONDecodeError, ValueError):
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.error = "LLM returned invalid JSON for assessment"
+                execution_log.add_call(call_record)
+
+        return assessments
+
+    # ------------------------------------------------------------------
+    # Step E: Synthesis & fusion
+    # ------------------------------------------------------------------
+
+    def _synthesize(
+        self,
+        ctx: "AgentContext",
+        assessed: list[dict[str, Any]],
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        current_time_str: str,
+        execution_log: ToolExecutionLog,
+    ) -> dict[str, Any]:
+        """Fuse assessed evidence into a coherent resolution via LLM."""
+        call_record = ToolCallRecord(
+            tool="agentic_rag:synthesize",
+            input={
+                "requirement_id": requirement.requirement_id,
+                "num_sources": len(assessed),
+            },
+            started_at=ctx.now().isoformat(),
+        )
+
+        # Format assessed sources for the LLM
+        formatted = []
+        for i, a in enumerate(assessed):
+            block = (
+                f"SOURCE [{i + 1}]\n"
+                f"URL: {a.get('url', 'Unknown')}\n"
+                f"CREDIBILITY_TIER: {a.get('credibility_tier', 3)}\n"
+                f"DATE_PUBLISHED: {a.get('date_published', 'Unknown')}\n"
+                f"CONFIDENCE: {a.get('confidence', 0)}\n"
+                f"KEY_QUOTE: {str(a.get('key_quote', ''))[:300]}\n"
+                f"PARSED_VALUE: {a.get('parsed_value', 'null')}\n"
+                f"REASON: {str(a.get('reason', ''))[:200]}"
+            )
+            formatted.append(block)
+
+        sources_text = "\n\n---\n\n".join(formatted)
+
+        semantics = prompt_spec.prediction_semantics
+        prompt = (
+            f"### CONTEXT\n"
+            f"CURRENT_TIME: {current_time_str}\n"
+            f"Market Question: {prompt_spec.market.question}\n"
+            f"Event Definition: {prompt_spec.market.event_definition}\n"
+            f"Entity: {semantics.target_entity}\n"
+            f"Predicate: {semantics.predicate}\n\n"
+            f"### DATA REQUIREMENT\n"
+            f"{requirement.description}\n\n"
+            f"### ASSESSED EVIDENCE SOURCES\n"
+            f"{sources_text}\n\n"
+            f"### TASK\n"
+            f"Synthesize the above sources into a single coherent resolution.\n"
+            f"Apply the source hierarchy: Tier 1 > Tier 2 > Tier 3.\n"
+            f"If sources conflict, document both sides."
+        )
+
+        messages = [
+            {"role": "system", "content": AGENTIC_SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            response = ctx.llm.chat(messages)
+            synthesis = self._extract_json(response.content)
+
+            call_record.ended_at = ctx.now().isoformat()
+            call_record.output = {
+                "resolution_status": synthesis.get("resolution_status"),
+                "confidence_score": synthesis.get("confidence_score"),
+                "num_evidence_sources": len(synthesis.get("evidence_sources", [])),
+            }
+            execution_log.add_call(call_record)
+            return synthesis
+
+        except (json.JSONDecodeError, ValueError):
+            call_record.ended_at = ctx.now().isoformat()
+            call_record.error = "LLM returned invalid JSON for synthesis"
+            execution_log.add_call(call_record)
+            return {
+                "resolution_status": "UNRESOLVED",
+                "confidence_score": 0.0,
+                "evidence_sources": [],
+                "conflicts": [],
+                "missing_info": ["Synthesis failed — LLM returned invalid JSON"],
+                "reasoning_trace": "Synthesis parse error",
+            }
+
+    # ------------------------------------------------------------------
+    # Build final EvidenceItem from synthesis
+    # ------------------------------------------------------------------
+
+    def _build_evidence_from_synthesis(
+        self,
+        ctx: "AgentContext",
+        req_id: str,
+        market_id: str,
+        synthesis: dict[str, Any],
+    ) -> EvidenceItem:
+        """Convert synthesis output to a properly structured EvidenceItem."""
+        evidence_id = hashlib.sha256(
+            f"agentic:{req_id}:final:{market_id}".encode()
+        ).hexdigest()[:16]
+
+        resolution_status = synthesis.get("resolution_status", "UNRESOLVED")
+        confidence_score = synthesis.get("confidence_score", 0.0)
+        success = (
+            resolution_status in ("RESOLVED", "AMBIGUOUS")
+            and confidence_score >= 0.5
+        )
+
+        # Normalize evidence_sources to standard format
+        raw_sources = synthesis.get("evidence_sources", synthesis.get("final_evidence", []))
+        evidence_sources = _normalize_evidence_sources(raw_sources)
+
+        extracted_fields = self._truncate_extracted_fields({
+            "confidence_score": confidence_score,
+            "resolution_status": resolution_status,
+            "evidence_sources": evidence_sources,
+            "conflicts": synthesis.get("conflicts", []),
+            "missing_info": synthesis.get("missing_info", []),
+        })
+
+        reasoning_trace = str(synthesis.get("reasoning_trace", ""))[:500]
+
+        return EvidenceItem(
+            evidence_id=evidence_id,
+            requirement_id=req_id,
+            provenance=Provenance(
+                source_id="agentic_rag",
+                source_uri="serper:search+http:fetch",
+                tier=2,
+                fetched_at=ctx.now(),
+                content_hash=self._hash_content(reasoning_trace),
+            ),
+            raw_content=reasoning_trace,
+            parsed_value=synthesis.get("parsed_value"),
+            extracted_fields=extracted_fields,
+            success=success,
+            error=None if success else f"Resolution status: {resolution_status}",
+        )
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    def _validate_output(
+        self,
+        bundle: EvidenceBundle,
+        tool_plan: ToolPlan,
+    ) -> VerificationResult:
+        """Validate agentic RAG collection results."""
+        checks: list[CheckResult] = []
+
+        if bundle.has_evidence:
+            checks.append(CheckResult.passed(
+                check_id="has_evidence",
+                message=f"AgenticRAG collected {len(bundle.items)} evidence items",
+            ))
+        else:
+            checks.append(CheckResult.failed(
+                check_id="has_evidence",
+                message="No evidence was collected",
+            ))
+
+        # Check synthesis quality
+        resolved_count = sum(
+            1 for e in bundle.items
+            if e.extracted_fields.get("resolution_status") == "RESOLVED"
+        )
+        if resolved_count > 0:
+            checks.append(CheckResult.passed(
+                check_id="synthesis_resolved",
+                message=f"{resolved_count} requirements resolved via synthesis",
+            ))
+
+        unfulfilled = bundle.requirements_unfulfilled
+        if not unfulfilled:
+            checks.append(CheckResult.passed(
+                check_id="requirements_fulfilled",
+                message="All requirements fulfilled",
+            ))
+        else:
+            checks.append(CheckResult.warning(
+                check_id="requirements_fulfilled",
+                message=f"Unfulfilled requirements: {unfulfilled}",
+            ))
+
+        ok = all(c.ok for c in checks)
+        return VerificationResult(ok=ok, checks=checks)
+
+    # ------------------------------------------------------------------
+    # Static helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_json(text: str) -> dict[str, Any]:
+        """Extract JSON from LLM response text."""
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if json_match:
+            return json.loads(json_match.group(1).strip())
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            return json.loads(text[start:end])
+        return json.loads(text.strip())
+
+    @staticmethod
+    def _hash_content(content: str) -> str:
+        """Hash content using SHA256."""
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    @staticmethod
+    def _truncate_extracted_fields(
+        fields: dict[str, Any], max_value_len: int = 500
+    ) -> dict[str, Any]:
+        """Truncate extracted field values to prevent oversized evidence."""
+        truncated: dict[str, Any] = {}
+        for key, value in fields.items():
+            if isinstance(value, str) and len(value) > max_value_len:
+                truncated[key] = value[:max_value_len] + "..."
+            else:
+                truncated[key] = value
+        return truncated
+
+
+def _normalize_evidence_sources(raw_sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize LLM-produced evidence source entries to the standard format.
+
+    Standard format (matching EvidenceSource schema):
+        url, source_id, credibility_tier (int 1-3), key_fact, supports, date_published
+
+    Handles variations across collector prompts:
+        - credibility_tier as string ("Tier 1") or int (1)
+        - supports as bool (supports_hypothesis) or string ("YES"/"NO")
+        - relevance_reason → key_fact fallback
+    """
+    _TIER_MAP = {"tier 1": 1, "tier 2": 2, "tier 3": 3}
+    normalized: list[dict[str, Any]] = []
+
+    for src in raw_sources:
+        if not isinstance(src, dict):
+            continue
+
+        # Normalize credibility_tier
+        raw_tier = src.get("credibility_tier", 3)
+        if isinstance(raw_tier, str):
+            tier = _TIER_MAP.get(raw_tier.lower().strip(), 3)
+        else:
+            tier = int(raw_tier) if raw_tier in (1, 2, 3) else 3
+
+        # Normalize supports
+        raw_supports = src.get("supports", src.get("supports_hypothesis", "N/A"))
+        if isinstance(raw_supports, bool):
+            supports = "YES" if raw_supports else "NO"
+        else:
+            supports = str(raw_supports).upper() if raw_supports else "N/A"
+            if supports not in ("YES", "NO", "N/A"):
+                supports = "N/A"
+
+        # key_fact fallback to relevance_reason
+        key_fact = src.get("key_fact", src.get("relevance_reason", ""))
+
+        normalized.append({
+            "url": src.get("url", ""),
+            "source_id": src.get("source_id"),
+            "credibility_tier": tier,
+            "key_fact": str(key_fact)[:300] if key_fact else "",
+            "supports": supports,
+            "date_published": src.get("date_published"),
+        })
+
+    return normalized
+
+
 def get_collector(
     ctx: "AgentContext",
     *,
+    prefer_agentic: bool = False,
     prefer_hyde: bool = False,
     prefer_llm: bool = True,
     prefer_http: bool = True,
@@ -1435,14 +2336,17 @@ def get_collector(
 
     Args:
         ctx: Agent context
+        prefer_agentic: If True and LLM + HTTP available, use AgenticRAG collector
         prefer_hyde: If True and LLM + HTTP available, use HyDE collector
         prefer_llm: If True and LLM client available, use LLM collector
         prefer_http: If True and HTTP client available, use HTTP collector
         mock_responses: Mock responses for mock collector
 
     Returns:
-        CollectorHyDE, CollectorLLM, CollectorHTTP, or CollectorMock
+        CollectorAgenticRAG, CollectorHyDE, CollectorLLM, CollectorHTTP, or CollectorMock
     """
+    if prefer_agentic and ctx.llm is not None and ctx.http is not None:
+        return CollectorAgenticRAG()
     if prefer_hyde and ctx.llm is not None and ctx.http is not None:
         return CollectorHyDE()
     if prefer_llm and ctx.llm is not None:
@@ -1480,10 +2384,20 @@ def _register_agents() -> None:
     """Register collector agents."""
     register_agent(
         step=AgentStep.COLLECTOR,
+        name="CollectorAgenticRAG",
+        factory=lambda ctx: CollectorAgenticRAG(),
+        capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
+        priority=170,  # Highest - AgenticRAG requires both LLM and HTTP
+        metadata={"description": "Agentic RAG collector with iterative deep reasoning. Plans queries, retrieves candidates, assesses relevance via LLM, and synthesizes evidence with conflict handling. Produces the highest-quality evidence bundles."},
+    )
+
+    register_agent(
+        step=AgentStep.COLLECTOR,
         name="CollectorHyDE",
         factory=lambda ctx: CollectorHyDE(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
-        priority=160,  # Highest - HyDE requires both LLM and HTTP
+        priority=160,  # High - HyDE requires both LLM and HTTP
+        metadata={"description": "Hypothetical Document Embeddings collector. Generates a hypothetical ideal answer first, then searches for real sources that match it. Good for complex or nuanced requirements."},
     )
 
     register_agent(
@@ -1492,6 +2406,7 @@ def _register_agents() -> None:
         factory=lambda ctx: CollectorLLM(),
         capabilities={AgentCapability.LLM},
         priority=150,  # High - preferred when LLM available
+        metadata={"description": "LLM-based collector that uses web browsing to fetch and interpret URL content. Extracts structured data via LLM with automatic JSON repair. Supports deferred source discovery via search."},
     )
 
     register_agent(
@@ -1500,6 +2415,7 @@ def _register_agents() -> None:
         factory=lambda ctx: CollectorHTTP(),
         capabilities={AgentCapability.NETWORK},
         priority=100,  # Primary HTTP
+        metadata={"description": "Direct HTTP collector that fetches data from explicit URLs in the tool plan. No LLM interpretation — returns raw API/page responses. Fast and deterministic."},
     )
 
     register_agent(
@@ -1509,6 +2425,7 @@ def _register_agents() -> None:
         capabilities={AgentCapability.DETERMINISTIC, AgentCapability.REPLAY},
         priority=50,  # Fallback
         is_fallback=True,
+        metadata={"description": "Mock collector for testing and replay. Returns predetermined responses without making real network requests."},
     )
 
 

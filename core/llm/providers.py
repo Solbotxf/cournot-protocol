@@ -31,7 +31,7 @@ PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "anthropic": "claude-sonnet-4-20250514",
     "google": "gemini-1.5-pro",
-    "grok": "grok-4-latest",
+    "grok": "grok-4-fast",
 }
 
 

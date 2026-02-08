@@ -33,6 +33,7 @@ class AgentInfo(BaseModel):
     """Information about a registered agent."""
 
     name: str = Field(..., description="Agent name")
+    description: str = Field(default="", description="Human-readable description of what this agent does")
     version: str = Field(..., description="Agent version")
     capabilities: list[str] = Field(default_factory=list, description="Agent capabilities")
     priority: int = Field(default=0, description="Selection priority")
@@ -84,6 +85,7 @@ async def get_capabilities() -> CapabilitiesResponse:
         agents = [
             AgentInfo(
                 name=e.name,
+                description=e.metadata.get("description", ""),
                 version=e.version,
                 capabilities=[c.value for c in e.capabilities],
                 priority=e.priority,

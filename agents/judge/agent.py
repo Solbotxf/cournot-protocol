@@ -568,8 +568,9 @@ def _register_agents() -> None:
         factory=lambda ctx: JudgeLLM(),
         capabilities={AgentCapability.LLM},
         priority=100,  # Primary
+        metadata={"description": "LLM-powered judge that reviews the reasoning trace and evidence to produce a final verdict (YES/NO/INVALID) with confidence score and rule citation."},
     )
-    
+
     register_agent(
         step=AgentStep.JUDGE,
         name="JudgeRuleBased",
@@ -577,6 +578,7 @@ def _register_agents() -> None:
         capabilities={AgentCapability.DETERMINISTIC, AgentCapability.REPLAY},
         priority=50,  # Fallback
         is_fallback=True,
+        metadata={"description": "Deterministic rule-based judge. Applies predefined verdict rules without LLM. Fully reproducible and suitable for replay verification."},
     )
 
 

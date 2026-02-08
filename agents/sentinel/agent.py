@@ -361,8 +361,9 @@ def _register_agents() -> None:
         factory=lambda ctx: SentinelStrict(),
         capabilities={AgentCapability.DETERMINISTIC, AgentCapability.REPLAY},
         priority=100,  # Primary
+        metadata={"description": "Strict sentinel that verifies all pipeline artifacts — hash integrity, schema compliance, and cross-reference consistency. Fails on any violation."},
     )
-    
+
     register_agent(
         step=AgentStep.SENTINEL,
         name="SentinelBasic",
@@ -370,6 +371,7 @@ def _register_agents() -> None:
         capabilities={AgentCapability.DETERMINISTIC, AgentCapability.REPLAY},
         priority=50,  # Fallback
         is_fallback=True,
+        metadata={"description": "Basic sentinel with minimal verification checks. Validates core artifact structure without exhaustive cross-referencing."},
     )
 
 
