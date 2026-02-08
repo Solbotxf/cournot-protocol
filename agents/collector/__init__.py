@@ -24,6 +24,9 @@ from .agent import (
     get_collector,
 )
 
+from .pan_agent import PANCollectorAgent, PANCollectorConfig
+from .pan_runtime import SearchAlgo, SearchConfig
+
 from .engine import CollectionEngine
 
 from .adapters import (
@@ -42,6 +45,11 @@ __all__ = [
     "CollectorLLM",
     "CollectorGraphRAG",
     "CollectorMock",
+    "PANCollectorAgent",
+    # PAN config / runtime
+    "PANCollectorConfig",
+    "SearchAlgo",
+    "SearchConfig",
     # Functions
     "collect_evidence",
     "get_collector",

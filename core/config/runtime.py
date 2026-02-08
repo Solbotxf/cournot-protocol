@@ -88,6 +88,16 @@ class AgentsConfig:
 
 
 @dataclass
+class PANSearchConfig:
+    """Configuration for PAN (ENCOMPASS-style) collector search."""
+    search_algo: str = "beam"          # "bon_global" | "bon_local" | "beam"
+    default_branching: int = 3         # N candidates per branchpoint
+    beam_width: int = 2                # K beams to keep (beam search only)
+    max_expansions: int = 50           # safety cap on total generate_fn calls
+    seed: Optional[int] = None         # RNG seed for determinism
+
+
+@dataclass
 class PipelineConfig:
     """Configuration for pipeline execution."""
     strict_mode: bool = False
@@ -114,6 +124,7 @@ class RuntimeConfig:
     agents: AgentsConfig = field(default_factory=AgentsConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     serper: SerperConfig = field(default_factory=SerperConfig)
+    pan: PANSearchConfig = field(default_factory=PANSearchConfig)
     proxy: Optional[str] = None  # e.g., "http://user:pass@host:port"
     extra: dict[str, Any] = field(default_factory=dict)
     
@@ -195,6 +206,7 @@ class RuntimeConfig:
         agents_data = data.get("agents", {})
         pipeline_data = data.get("pipeline", {})
         serper_data = data.get("serper", {}) or data.get("google_cse", {})
+        pan_data = data.get("pan", {})
         if isinstance(serper_data, dict):
             serper = SerperConfig(api_key=serper_data.get("api_key"))
         else:
@@ -203,6 +215,7 @@ class RuntimeConfig:
         llm = LLMConfig(**llm_data) if llm_data else LLMConfig()
         http = HttpConfig(**http_data) if http_data else HttpConfig()
         pipeline = PipelineConfig(**pipeline_data) if pipeline_data else PipelineConfig()
+        pan = PANSearchConfig(**pan_data) if pan_data else PANSearchConfig()
 
         # Parse agents config
         agents = AgentsConfig()
@@ -220,6 +233,7 @@ class RuntimeConfig:
             agents=agents,
             pipeline=pipeline,
             serper=serper,
+            pan=pan,
             proxy=data.get("proxy"),
             extra=data.get("extra", {}),
         )
@@ -281,6 +295,13 @@ class RuntimeConfig:
             },
             "serper": {
                 "api_key": self.serper.api_key,
+            },
+            "pan": {
+                "search_algo": self.pan.search_algo,
+                "default_branching": self.pan.default_branching,
+                "beam_width": self.pan.beam_width,
+                "max_expansions": self.pan.max_expansions,
+                "seed": self.pan.seed,
             },
             "extra": self.extra,
         }

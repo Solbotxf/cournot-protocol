@@ -3438,28 +3438,35 @@ def _normalize_evidence_sources(raw_sources: list[dict[str, Any]]) -> list[dict[
 def get_collector(
     ctx: "AgentContext",
     *,
+    prefer_pan: bool = False,
     prefer_agentic: bool = False,
     prefer_graphrag: bool = False,
     prefer_hyde: bool = False,
     prefer_llm: bool = True,
     prefer_http: bool = True,
     mock_responses: dict[str, Any] | None = None,
+    pan_config: Any | None = None,
 ) -> BaseAgent:
     """
     Get the appropriate collector based on context.
 
     Args:
         ctx: Agent context
+        prefer_pan: If True and LLM + HTTP available, use PAN collector
         prefer_agentic: If True and LLM + HTTP available, use AgenticRAG collector
         prefer_graphrag: If True and LLM + HTTP available, use GraphRAG collector
         prefer_hyde: If True and LLM + HTTP available, use HyDE collector
         prefer_llm: If True and LLM client available, use LLM collector
         prefer_http: If True and HTTP client available, use HTTP collector
         mock_responses: Mock responses for mock collector
+        pan_config: PANCollectorConfig for the PAN collector
 
     Returns:
-        CollectorAgenticRAG, CollectorGraphRAG, CollectorHyDE, CollectorLLM, CollectorHTTP, or CollectorMock
+        PANCollectorAgent, CollectorAgenticRAG, CollectorGraphRAG, CollectorHyDE, CollectorLLM, CollectorHTTP, or CollectorMock
     """
+    if prefer_pan and ctx.llm is not None and ctx.http is not None:
+        from .pan_agent import PANCollectorAgent
+        return PANCollectorAgent(pan_config=pan_config)
     if prefer_agentic and ctx.llm is not None and ctx.http is not None:
         return CollectorAgenticRAG()
     if prefer_graphrag and ctx.llm is not None and ctx.http is not None:
@@ -3499,6 +3506,25 @@ def collect_evidence(
 # Register agents with the global registry
 def _register_agents() -> None:
     """Register collector agents."""
+    from .pan_agent import PANCollectorAgent
+
+    register_agent(
+        step=AgentStep.COLLECTOR,
+        name="CollectorPAN",
+        factory=lambda ctx: PANCollectorAgent(),
+        capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
+        priority=175,  # Above AgenticRAG — PAN wraps workflow with search
+        metadata={
+            "description": (
+                "PAN (Program-of-thought with Adaptive search over Nondeterminism) collector. "
+                "Runs the evidence-collection workflow through branchpoint search "
+                "(beam / best-of-N) to explore multiple execution paths and keep "
+                "the highest-scoring result. Configurable via search_algo, "
+                "default_branching, and beam_width."
+            ),
+        },
+    )
+
     register_agent(
         step=AgentStep.COLLECTOR,
         name="CollectorAgenticRAG",

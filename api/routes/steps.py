@@ -82,7 +82,7 @@ class ResolveRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt output)"
     )
-    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG"]] = Field(
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN"]] = Field(
         default=["CollectorLLM"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
@@ -133,7 +133,7 @@ class CollectRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt)"
     )
-    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG"]] = Field(
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN"]] = Field(
         default=["CollectorLLM"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
@@ -153,6 +153,26 @@ class CollectRequest(BaseModel):
     llm_model: str | None = Field(
         default=None,
         description="Override LLM model (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Uses provider default if omitted.",
+    )
+    pan_search_algo: Literal["bon_global", "bon_local", "beam"] | None = Field(
+        default=None,
+        description="PAN search algorithm. Only used when CollectorPAN is in collectors.",
+    )
+    pan_default_branching: int | None = Field(
+        default=None,
+        description="PAN branching factor N (candidates per branchpoint). Only used with CollectorPAN.",
+        ge=1,
+        le=20,
+    )
+    pan_beam_width: int | None = Field(
+        default=None,
+        description="PAN beam width K (beams to keep). Only used with CollectorPAN + beam algo.",
+        ge=1,
+        le=20,
+    )
+    pan_seed: int | None = Field(
+        default=None,
+        description="PAN RNG seed for determinism. Only used with CollectorPAN.",
     )
 
 
@@ -530,9 +550,29 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
         collectors_used = []
         errors = []
 
+        # Build PAN config once if any collector is CollectorPAN
+        pan_collector_instance = None
+        if "CollectorPAN" in request.collectors:
+            from agents.collector.pan_agent import PANCollectorAgent, PANCollectorConfig
+            from core.config import RuntimeConfig
+
+            # Start from server-level defaults, override with request params
+            server_cfg = ctx.config or RuntimeConfig()
+            pan_cfg = PANCollectorConfig(
+                search_algo=request.pan_search_algo or server_cfg.pan.search_algo,
+                default_branching=request.pan_default_branching or server_cfg.pan.default_branching,
+                beam_width=request.pan_beam_width or server_cfg.pan.beam_width,
+                max_expansions=server_cfg.pan.max_expansions,
+                seed=request.pan_seed if request.pan_seed is not None else server_cfg.pan.seed,
+            )
+            pan_collector_instance = PANCollectorAgent(pan_config=pan_cfg)
+
         for collector_name in request.collectors:
             try:
-                collector = registry.get_agent_by_name(collector_name, ctx)
+                if collector_name == "CollectorPAN":
+                    collector = pan_collector_instance
+                else:
+                    collector = registry.get_agent_by_name(collector_name, ctx)
             except ValueError:
                 errors.append(f"Collector not found: {collector_name}")
                 continue
