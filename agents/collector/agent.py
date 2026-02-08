@@ -39,6 +39,16 @@ from core.schemas import (
 
 from .engine import CollectionEngine
 from .adapters import MockAdapter, get_adapter
+from .graphrag_engine import (
+    GraphIndex,
+    chunk_text_units,
+    merge_elements_into_graph,
+    detect_communities,
+    build_local_context_pack,
+    normalize_entity_name,
+    rank_communities_by_query,
+    infer_credibility_tier,
+)
 
 if TYPE_CHECKING:
     from agents.context import AgentContext
@@ -1076,26 +1086,7 @@ class CollectorHyDE(BaseAgent):
             ctx.info(f"HyDE processing requirement: {req_id}")
 
             # Use HyDE for all requirements (both deferred and explicit)
-            evidence = self._hyde_collect(ctx, requirement, prompt_spec)
-
-            call_record = ToolCallRecord(
-                tool="hyde:collect",
-                input={
-                    "requirement_id": req_id,
-                    "description": requirement.description,
-                },
-                started_at=ctx.now().isoformat(),
-            )
-            call_record.ended_at = ctx.now().isoformat()
-            call_record.output = {
-                "success": evidence.success,
-                "evidence_id": evidence.evidence_id,
-                "hypothesis_match": evidence.extracted_fields.get("hypothesis_match"),
-            }
-            if evidence.error:
-                call_record.error = evidence.error
-
-            execution_log.add_call(call_record)
+            evidence = self._hyde_collect(ctx, requirement, prompt_spec, execution_log)
             bundle.add_item(evidence)
 
         bundle.collected_at = ctx.now()
@@ -1125,6 +1116,7 @@ class CollectorHyDE(BaseAgent):
         ctx: "AgentContext",
         requirement: "DataRequirement",
         prompt_spec: PromptSpec,
+        execution_log: ToolExecutionLog,
     ) -> EvidenceItem:
         """
         Collect evidence using HyDE pattern.
@@ -1135,17 +1127,24 @@ class CollectorHyDE(BaseAgent):
         3. Search for real sources
         4. Synthesize by comparing real sources to hypothesis
         """
+        req_id = requirement.requirement_id
         semantics = prompt_spec.prediction_semantics
         evidence_id = hashlib.sha256(
-            f"hyde:{requirement.requirement_id}".encode()
+            f"hyde:{req_id}".encode()
         ).hexdigest()[:16]
 
         event_def = prompt_spec.market.event_definition
         assumptions_list = prompt_spec.extra.get("assumptions", [])
         assumptions_str = "\n".join([f"- {a}" for a in assumptions_list]) if assumptions_list else "None"
 
-        # Step 1: Generate hypothetical document
+        # ── Step 1: Generate hypothetical document ──────────────────
         ctx.info("HyDE Step 1: Generating hypothetical document...")
+        hypothesis_record = ToolCallRecord(
+            tool="hyde:hypothesis",
+            input={"requirement_id": req_id},
+            started_at=ctx.now().isoformat(),
+        )
+
         hypothesis_prompt = (
             f"Generate a hypothetical ideal document for this requirement:\n\n"
             f"### REQUIREMENT\n"
@@ -1175,12 +1174,24 @@ class CollectorHyDE(BaseAgent):
             hypothetical_doc = hypothesis_data.get("hypothetical_document", "")
             search_queries = hypothesis_data.get("search_queries", [])[:3]
             key_phrases = hypothesis_data.get("key_phrases", [])
+
+            hypothesis_record.ended_at = ctx.now().isoformat()
+            hypothesis_record.output = {
+                "num_queries": len(search_queries),
+                "num_key_phrases": len(key_phrases),
+                "doc_length": len(hypothetical_doc),
+            }
         except (json.JSONDecodeError, KeyError) as e:
             ctx.warning(f"Failed to parse hypothesis: {e}")
-            # Fallback: use requirement description as search query
             hypothetical_doc = requirement.description
             search_queries = [f"{semantics.target_entity} {semantics.predicate}"]
             key_phrases = []
+
+            hypothesis_record.ended_at = ctx.now().isoformat()
+            hypothesis_record.error = f"JSON parse failed, using fallback: {e}"
+            hypothesis_record.output = {"num_queries": len(search_queries), "fallback": True}
+
+        execution_log.add_call(hypothesis_record)
 
         if not search_queries:
             search_queries = [f"{semantics.target_entity} {semantics.predicate}"]
@@ -1188,14 +1199,14 @@ class CollectorHyDE(BaseAgent):
         ctx.info(f"HyDE generated {len(search_queries)} search queries")
         ctx.debug(f"[Hypothesis] all search queries {search_queries}")
 
-        # Step 2: Search for real sources using hypothesis-derived queries
+        # ── Step 2: Search for real sources ─────────────────────────
         ctx.info("HyDE Step 2: Searching for real sources...")
-        search_results = self._execute_search_queries(ctx, search_queries)
+        search_results = self._execute_search_queries(ctx, search_queries, execution_log)
 
         if not search_results:
             return EvidenceItem(
                 evidence_id=evidence_id,
-                requirement_id=requirement.requirement_id,
+                requirement_id=req_id,
                 provenance=Provenance(
                     source_id="hyde",
                     source_uri="serper:search",
@@ -1210,9 +1221,18 @@ class CollectorHyDE(BaseAgent):
                 },
             )
 
-        # Step 3: Synthesize real evidence by comparing to hypothesis
+        # ── Step 3: Synthesize real evidence against hypothesis ─────
         ctx.info("HyDE Step 3: Synthesizing evidence...")
         ctx.debug(f"[Hypothesis] search results {search_results}")
+        synthesis_record = ToolCallRecord(
+            tool="hyde:synthesize",
+            input={
+                "requirement_id": req_id,
+                "num_search_results": len(search_results),
+            },
+            started_at=ctx.now().isoformat(),
+        )
+
         current_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         # Format search results
@@ -1291,9 +1311,18 @@ class CollectorHyDE(BaseAgent):
                 "hypothetical_document": hypothetical_doc[:300],
             }
 
+            synthesis_record.ended_at = ctx.now().isoformat()
+            synthesis_record.output = {
+                "hypothesis_match": hypothesis_match,
+                "confidence_score": confidence_score,
+                "resolution_status": resolution_status,
+                "num_evidence_sources": len(evidence_sources),
+            }
+            execution_log.add_call(synthesis_record)
+
             return EvidenceItem(
                 evidence_id=evidence_id,
-                requirement_id=requirement.requirement_id,
+                requirement_id=req_id,
                 provenance=Provenance(
                     source_id="hyde",
                     source_uri="serper:search",
@@ -1309,9 +1338,13 @@ class CollectorHyDE(BaseAgent):
             )
 
         except json.JSONDecodeError:
+            synthesis_record.ended_at = ctx.now().isoformat()
+            synthesis_record.error = "LLM returned invalid JSON for synthesis"
+            execution_log.add_call(synthesis_record)
+
             return EvidenceItem(
                 evidence_id=evidence_id,
-                requirement_id=requirement.requirement_id,
+                requirement_id=req_id,
                 provenance=Provenance(
                     source_id="hyde",
                     source_uri="serper:search",
@@ -1330,6 +1363,7 @@ class CollectorHyDE(BaseAgent):
         self,
         ctx: "AgentContext",
         queries: list[str],
+        execution_log: ToolExecutionLog,
     ) -> list[dict[str, str]]:
         """Execute search queries via Serper API."""
         api_key = os.getenv("SERPER_API_KEY", "").strip()
@@ -1344,6 +1378,11 @@ class CollectorHyDE(BaseAgent):
         seen_urls: set[str] = set()
 
         for query in queries:
+            call_record = ToolCallRecord(
+                tool="hyde:search",
+                input={"query": query},
+                started_at=ctx.now().isoformat(),
+            )
             try:
                 response = ctx.http.post(
                     "https://google.serper.dev/search",
@@ -1356,9 +1395,13 @@ class CollectorHyDE(BaseAgent):
                 )
                 if not response.ok:
                     ctx.warning(f"Serper search failed for '{query}': HTTP {response.status_code}")
+                    call_record.ended_at = ctx.now().isoformat()
+                    call_record.error = f"HTTP {response.status_code}"
+                    execution_log.add_call(call_record)
                     continue
 
                 data = response.json()
+                results_found = 0
                 for item in data.get("organic", [])[:5]:
                     url = item.get("link", "")
                     if url and url not in seen_urls:
@@ -1369,8 +1412,17 @@ class CollectorHyDE(BaseAgent):
                             "url": url,
                             "date": item.get("date", "Unknown"),
                         })
+                        results_found += 1
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {"results_found": results_found}
+                execution_log.add_call(call_record)
+
             except Exception as e:
                 ctx.warning(f"Serper search error for '{query}': {e}")
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.error = str(e)
+                execution_log.add_call(call_record)
 
         return all_results
 
@@ -2273,6 +2325,1067 @@ class CollectorAgenticRAG(BaseAgent):
         return truncated
 
 
+# =============================================================================
+# GraphRAG Collector — Local-to-Global approach
+# =============================================================================
+
+GRAPHRAG_ELEMENT_EXTRACTION_SYSTEM_PROMPT = """You extract structured graph elements from text for a retrieval+summarization oracle.
+Return ONLY valid JSON.
+
+OUTPUT SCHEMA:
+{
+  "entities": [{"name": "...", "type": "PERSON|ORG|EVENT|METRIC|LOCATION|CONCEPT", "description": "one-line description"}],
+  "relations": [{"head": "...", "relation": "...", "tail": "...", "quote": "supporting excerpt"}],
+  "claims": [{"claim": "short canonical statement", "quote": "supporting excerpt", "supports": "YES|NO|N/A"}],
+  "date_published": "YYYY-MM-DD or null"
+}
+
+RULES:
+- Extract ALL named entities, organisations, dates, metrics, and events.
+- Relations must reference entity names that appear in the entities list.
+- Claims are key factual assertions — canonicalize them into short statements.
+- Quotes must come verbatim from the provided text (≤150 chars each).
+- Do NOT invent facts not present in the text.
+"""
+
+GRAPHRAG_COMMUNITY_REPORT_SYSTEM_PROMPT = """You write a compact community report grounded in provided entities/relations/quotes only.
+Return ONLY valid JSON.
+
+OUTPUT SCHEMA:
+{
+  "community_title": "short descriptive title",
+  "summary": "2-4 sentence summary of the community's key information",
+  "key_entities": ["entity_name_1", "entity_name_2"],
+  "key_facts": ["fact 1", "fact 2"],
+  "citations": [{"url": "...", "quote": "..."}]
+}
+
+RULES:
+- Ground every claim in the provided entities, relations, and quotes.
+- Keep summary ≤ 1200 characters.
+- Do NOT introduce facts not present in the input.
+"""
+
+GRAPHRAG_COMMUNITY_MAP_SYSTEM_PROMPT = """You produce a partial, query-focused answer from ONE community report.
+Return ONLY valid JSON. Do not invent facts.
+
+OUTPUT SCHEMA:
+{
+  "community_id": "c0",
+  "supports": "YES|NO|N/A",
+  "parsed_value": "extracted value or null",
+  "confidence": 0.0 to 1.0,
+  "key_fact": "the single most important fact from this community",
+  "evidence_sources": [
+    {
+      "url": "...",
+      "credibility_tier": 1 or 2 or 3,
+      "key_fact": "...",
+      "supports": "YES|NO|N/A",
+      "date_published": "YYYY-MM-DD or null"
+    }
+  ],
+  "missing_info": ["information still needed"]
+}
+"""
+
+GRAPHRAG_REDUCE_SYSTEM_PROMPT = """You are the Chief Evidence Synthesizer for a prediction market resolution oracle.
+You receive partial answers from community-level MAP steps and a local context pack of entity-level evidence.
+Fuse them into a single coherent resolution.
+
+### RULES
+1. **Source Hierarchy:** Tier 1 > Tier 2 > Tier 3. Same-tier conflict → most recent wins.
+2. **Temporal Awareness:** Compare dates against CURRENT_TIME. Recent evidence preferred.
+3. **Conflict Handling:** Document both sides. Keep opposing sources for transparency.
+4. **Grounding:** Do NOT introduce facts not present in the input. Every claim must cite a URL.
+5. **Parsimony:** Simplest conclusion supported by strongest evidence.
+
+### OUTPUT FORMAT
+Return ONLY a single valid JSON object (no markdown, no commentary):
+{
+  "resolution_status": "RESOLVED" or "AMBIGUOUS" or "UNRESOLVED",
+  "parsed_value": "the specific answer or null",
+  "confidence_score": 0.0 to 1.0,
+  "evidence_sources": [
+    {
+      "url": "...",
+      "credibility_tier": 1 or 2 or 3,
+      "key_fact": "...",
+      "supports": "YES" or "NO" or "N/A",
+      "date_published": "YYYY-MM-DD" or null
+    }
+  ],
+  "conflicts": ["description of conflicts"],
+  "missing_info": ["information still needed"],
+  "reasoning_trace": "Step-by-step deduction: 1) ... 2) ... Conclusion: ..."
+}
+"""
+
+GRAPHRAG_SEED_ENTITIES_SYSTEM_PROMPT = """Given a query about a prediction market, identify 5-10 seed entity names or must-have terms that are central to answering the query. Return ONLY valid JSON.
+
+OUTPUT SCHEMA:
+{
+  "seed_entities": ["entity_or_term_1", "entity_or_term_2", ...]
+}
+
+RULES:
+- Include proper nouns (people, organizations, places) relevant to the query.
+- Include key metric names, dates, and event names.
+- Keep terms concise — single words or short phrases.
+"""
+
+
+class CollectorGraphRAG(BaseAgent):
+    """
+    GraphRAG Collector — Local-to-Global query-focused summarization.
+
+    Implements the GraphRAG approach:
+    1. **Retrieve** — Search + fetch documents (reuses AgenticRAG patterns).
+    2. **Index** — Chunk documents into text units, extract entities/relations
+       via LLM, build an in-memory graph, detect communities, and generate
+       community-level summary reports.
+    3. **Query (Local)** — Identify seed entities, expand neighborhoods,
+       build a compact local context pack.
+    4. **Query (Global)** — Rank communities by relevance, MAP each to a
+       partial answer, REDUCE into a final synthesis.
+    5. **Emit** — Produce a standard EvidenceItem with graph_stats and
+       community metadata.
+    """
+
+    _name = "CollectorGraphRAG"
+    _version = "v1"
+    _capabilities = {AgentCapability.LLM, AgentCapability.NETWORK}
+
+    MAX_RETRIES = 2
+    TOP_K_FETCH = 5
+    MAX_FRAGMENT_BYTES = 15_000
+    TOP_M_COMMUNITIES = 3
+
+    def run(
+        self,
+        ctx: "AgentContext",
+        prompt_spec: PromptSpec,
+        tool_plan: ToolPlan,
+    ) -> AgentResult:
+        """Execute GraphRAG collection with graph-based indexing and query."""
+        if ctx.llm is None:
+            return AgentResult.failure(error="LLM client not available")
+        if ctx.http is None:
+            return AgentResult.failure(error="HTTP client not available")
+
+        ctx.info(f"CollectorGraphRAG executing plan {tool_plan.plan_id}")
+
+        bundle = EvidenceBundle(
+            bundle_id=f"graphrag_{tool_plan.plan_id}",
+            market_id=prompt_spec.market_id,
+            plan_id=tool_plan.plan_id,
+        )
+
+        execution_log = ToolExecutionLog(
+            plan_id=tool_plan.plan_id,
+            started_at=ctx.now().isoformat(),
+        )
+
+        for req_id in tool_plan.requirements:
+            requirement = prompt_spec.get_requirement_by_id(req_id)
+            if not requirement:
+                continue
+
+            ctx.info(f"GraphRAG processing requirement: {req_id}")
+            evidence = self._collect_requirement(
+                ctx, requirement, prompt_spec, execution_log,
+            )
+            bundle.add_item(evidence)
+
+        bundle.collected_at = ctx.now()
+        bundle.requirements_fulfilled = [
+            req_id for req_id in tool_plan.requirements
+            if any(e.requirement_id == req_id and e.success for e in bundle.items)
+        ]
+        bundle.requirements_unfulfilled = [
+            req_id for req_id in tool_plan.requirements
+            if req_id not in bundle.requirements_fulfilled
+        ]
+        execution_log.ended_at = ctx.now().isoformat()
+
+        return AgentResult(
+            output=(bundle, execution_log),
+            verification=self._validate_output(bundle, tool_plan),
+            receipts=ctx.get_receipt_refs(),
+            success=bundle.has_evidence,
+            error=None if bundle.has_evidence else "No evidence collected",
+            metadata={
+                "collector": "graphrag",
+                "bundle_id": bundle.bundle_id,
+                "items_collected": len(bundle.items),
+                "requirements_fulfilled": bundle.requirements_fulfilled,
+                "requirements_unfulfilled": bundle.requirements_unfulfilled,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Core per-requirement pipeline
+    # ------------------------------------------------------------------
+
+    def _collect_requirement(
+        self,
+        ctx: "AgentContext",
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        execution_log: ToolExecutionLog,
+    ) -> EvidenceItem:
+        """Run the full GraphRAG pipeline for one requirement."""
+        req_id = requirement.requirement_id
+        market_id = prompt_spec.market_id
+        semantics = prompt_spec.prediction_semantics
+        event_def = prompt_spec.market.event_definition
+        assumptions_list = prompt_spec.extra.get("assumptions", [])
+        assumptions_str = (
+            "\n".join([f"- {a}" for a in assumptions_list])
+            if assumptions_list else "None"
+        )
+        current_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        evidence_id = hashlib.sha256(
+            f"graphrag:{req_id}:{market_id}".encode()
+        ).hexdigest()[:16]
+
+        # ── A) Retrieval: plan queries + search + fetch ─────────────
+        plan = self._plan_queries(
+            ctx, requirement, prompt_spec, semantics, event_def,
+            assumptions_str, current_time_str, execution_log,
+        )
+        queries = plan.get("queries", [])[:4]
+        domain_hints = plan.get("domain_hints", [])
+        for hint in domain_hints[:2]:
+            if queries:
+                queries.append(f"{queries[0]} {hint}")
+        if not queries:
+            queries = [f"{semantics.target_entity} {semantics.predicate}"]
+
+        global_seen_urls: set[str] = set()
+        search_results = self._execute_search_queries(
+            ctx, queries, global_seen_urls, execution_log,
+        )
+
+        if not search_results:
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=req_id,
+                provenance=Provenance(
+                    source_id="graphrag",
+                    source_uri="serper:search",
+                    tier=2,
+                    fetched_at=ctx.now(),
+                ),
+                success=False,
+                error="No search results found (Serper API may not be configured)",
+            )
+
+        fragments = self._fetch_pages(
+            ctx, search_results[:self.TOP_K_FETCH], execution_log,
+        )
+
+        if not fragments:
+            return EvidenceItem(
+                evidence_id=evidence_id,
+                requirement_id=req_id,
+                provenance=Provenance(
+                    source_id="graphrag",
+                    source_uri="serper:search+http:fetch",
+                    tier=2,
+                    fetched_at=ctx.now(),
+                ),
+                success=False,
+                error="All fetched pages returned errors or empty content",
+            )
+
+        # ── B) GraphRAG index build ─────────────────────────────────
+        graph = GraphIndex()
+
+        # Chunk each document into text units
+        for frag in fragments:
+            units = chunk_text_units(
+                frag["fragment"],
+                frag["url"],
+                frag.get("title", ""),
+            )
+            graph.text_units.extend(units)
+
+        # Extract graph elements from each text unit via LLM
+        for tu in graph.text_units:
+            elements = self._extract_graph_elements(
+                ctx, tu, requirement, prompt_spec, execution_log,
+            )
+            if elements:
+                merge_elements_into_graph(graph, elements, tu.doc_url, tu.id)
+
+        # Community detection
+        comm_record = ToolCallRecord(
+            tool="graphrag:communities",
+            input={"num_entities": len(graph.entities)},
+            started_at=ctx.now().isoformat(),
+        )
+        communities = detect_communities(graph, min_size=2)
+        comm_record.ended_at = ctx.now().isoformat()
+        comm_record.output = {"num_communities": len(communities)}
+        execution_log.add_call(comm_record)
+
+        # Generate community reports
+        self._generate_community_reports(
+            ctx, graph, requirement, prompt_spec, execution_log,
+        )
+
+        ctx.info(
+            f"GraphRAG index built: {graph.stats}"
+        )
+
+        # ── C) Query: local + global ────────────────────────────────
+        query_text = (
+            f"{requirement.description} "
+            f"{prompt_spec.market.question} "
+            f"{event_def}"
+        )
+
+        # Local: seed entities → neighborhood pack
+        local_pack = self._query_local(
+            ctx, query_text, graph, execution_log,
+        )
+
+        # Global: community MAP → REDUCE
+        synthesis = self._query_global_map_reduce(
+            ctx, query_text, graph, local_pack,
+            requirement, prompt_spec, current_time_str, execution_log,
+        )
+
+        # ── D) Build EvidenceItem ───────────────────────────────────
+        return self._build_evidence_from_synthesis(
+            ctx, req_id, market_id, synthesis, graph,
+        )
+
+    # ------------------------------------------------------------------
+    # A-1) Query planning (reuses agentic pattern)
+    # ------------------------------------------------------------------
+
+    def _plan_queries(
+        self,
+        ctx: "AgentContext",
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        semantics: Any,
+        event_def: str,
+        assumptions_str: str,
+        current_time_str: str,
+        execution_log: ToolExecutionLog,
+    ) -> dict[str, Any]:
+        """Generate retrieval blueprint via LLM."""
+        call_record = ToolCallRecord(
+            tool="graphrag:plan",
+            input={"requirement_id": requirement.requirement_id},
+            started_at=ctx.now().isoformat(),
+        )
+
+        prompt = (
+            f"Generate a retrieval blueprint for this data requirement:\n"
+            f"- Requirement: {requirement.description}\n"
+            f"- Market question: {prompt_spec.market.question}\n"
+            f"- Event Definition: {event_def}\n"
+            f"- Key Assumptions:\n{assumptions_str}\n"
+            f"- Entity: {semantics.target_entity}\n"
+            f"- Predicate: {semantics.predicate}\n"
+            f"- Threshold: {semantics.threshold or 'N/A'}\n"
+            f"- Current UTC time: {current_time_str}\n"
+        )
+
+        messages = [
+            {"role": "system", "content": AGENTIC_QUERY_PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        response = ctx.llm.chat(messages)
+
+        try:
+            plan = self._extract_json(response.content)
+        except (json.JSONDecodeError, ValueError):
+            plan = {
+                "queries": [f"{semantics.target_entity} {semantics.predicate}"],
+                "domain_hints": [],
+            }
+
+        call_record.ended_at = ctx.now().isoformat()
+        call_record.output = {"queries": plan.get("queries", [])[:4]}
+        execution_log.add_call(call_record)
+        return plan
+
+    # ------------------------------------------------------------------
+    # A-2) Serper search (with global de-dupe)
+    # ------------------------------------------------------------------
+
+    def _execute_search_queries(
+        self,
+        ctx: "AgentContext",
+        queries: list[str],
+        global_seen_urls: set[str],
+        execution_log: ToolExecutionLog,
+    ) -> list[dict[str, str]]:
+        """Execute search queries via Serper API with global de-dupe."""
+        api_key = os.getenv("SERPER_API_KEY", "").strip()
+        if ctx.config and hasattr(ctx.config, "serper") and ctx.config.serper:
+            api_key = (ctx.config.serper.api_key or "").strip() or api_key
+
+        if not api_key or not ctx.http:
+            ctx.warning("Serper API not configured for GraphRAG")
+            return []
+
+        all_results: list[dict[str, str]] = []
+
+        for query in queries:
+            call_record = ToolCallRecord(
+                tool="graphrag:search",
+                input={"query": query},
+                started_at=ctx.now().isoformat(),
+            )
+            try:
+                response = ctx.http.post(
+                    "https://google.serper.dev/search",
+                    headers={
+                        "X-API-KEY": api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json={"q": query},
+                    timeout=30.0,
+                )
+                if not response.ok:
+                    call_record.ended_at = ctx.now().isoformat()
+                    call_record.error = f"HTTP {response.status_code}"
+                    execution_log.add_call(call_record)
+                    continue
+
+                data = response.json()
+                results_found = 0
+                for item in data.get("organic", [])[:7]:
+                    url = item.get("link", "")
+                    if url and url not in global_seen_urls:
+                        global_seen_urls.add(url)
+                        all_results.append({
+                            "title": item.get("title", ""),
+                            "snippet": item.get("snippet", ""),
+                            "url": url,
+                            "date": item.get("date", ""),
+                        })
+                        results_found += 1
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {"results_found": results_found}
+                execution_log.add_call(call_record)
+
+            except Exception as e:
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.error = str(e)
+                execution_log.add_call(call_record)
+
+        return all_results
+
+    # ------------------------------------------------------------------
+    # A-3) Fetch pages
+    # ------------------------------------------------------------------
+
+    def _fetch_pages(
+        self,
+        ctx: "AgentContext",
+        candidates: list[dict[str, str]],
+        execution_log: ToolExecutionLog,
+    ) -> list[dict[str, Any]]:
+        """Fetch top candidate URLs and extract compact fragments."""
+        fragments: list[dict[str, Any]] = []
+
+        for candidate in candidates:
+            url = candidate["url"]
+            call_record = ToolCallRecord(
+                tool="graphrag:fetch",
+                input={"url": url},
+                started_at=ctx.now().isoformat(),
+            )
+            try:
+                response = ctx.http.get(url, timeout=20.0)
+                status_code = response.status_code
+
+                if not response.ok:
+                    call_record.ended_at = ctx.now().isoformat()
+                    call_record.error = f"HTTP {status_code}"
+                    call_record.output = {"status_code": status_code}
+                    execution_log.add_call(call_record)
+                    continue
+
+                raw_text = response.text[:self.MAX_FRAGMENT_BYTES]
+                content_hash = self._hash_content(raw_text)
+
+                fragments.append({
+                    "url": url,
+                    "title": candidate.get("title", ""),
+                    "snippet": candidate.get("snippet", ""),
+                    "date": candidate.get("date", ""),
+                    "fragment": raw_text,
+                    "content_hash": content_hash,
+                    "status_code": status_code,
+                })
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {
+                    "status_code": status_code,
+                    "content_hash": content_hash,
+                    "fragment_length": len(raw_text),
+                }
+                execution_log.add_call(call_record)
+
+            except Exception as e:
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.error = str(e)
+                execution_log.add_call(call_record)
+
+        return fragments
+
+    # ------------------------------------------------------------------
+    # B) Graph element extraction per text unit
+    # ------------------------------------------------------------------
+
+    def _extract_graph_elements(
+        self,
+        ctx: "AgentContext",
+        text_unit: Any,
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        execution_log: ToolExecutionLog,
+    ) -> dict[str, Any] | None:
+        """Ask LLM to extract entities/relations/claims from a text unit."""
+        call_record = ToolCallRecord(
+            tool="graphrag:extract_elements",
+            input={"text_unit_id": text_unit.id, "url": text_unit.doc_url},
+            started_at=ctx.now().isoformat(),
+        )
+
+        semantics = prompt_spec.prediction_semantics
+        prompt = (
+            f"### DOCUMENT\n"
+            f"URL: {text_unit.doc_url}\n"
+            f"Title: {text_unit.doc_title}\n\n"
+            f"### TEXT UNIT\n"
+            f"{text_unit.content}\n\n"
+            f"### CONTEXT\n"
+            f"Market Question: {prompt_spec.market.question}\n"
+            f"Requirement: {requirement.description}\n"
+            f"Event Definition: {prompt_spec.market.event_definition}\n"
+            f"Entity: {semantics.target_entity}\n"
+            f"Predicate: {semantics.predicate}\n\n"
+            f"### TASK\n"
+            f"Extract all entities, relations, and key claims from the text unit above."
+        )
+
+        messages = [
+            {"role": "system", "content": GRAPHRAG_ELEMENT_EXTRACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+
+        last_error: str | None = None
+        raw_output = ""
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                if attempt == 0:
+                    response = ctx.llm.chat(messages)
+                    raw_output = response.content
+                elements = self._extract_json(raw_output)
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {
+                    "entities": len(elements.get("entities", [])),
+                    "relations": len(elements.get("relations", [])),
+                    "claims": len(elements.get("claims", [])),
+                }
+                execution_log.add_call(call_record)
+                return elements
+
+            except (json.JSONDecodeError, ValueError) as e:
+                last_error = str(e)
+                if attempt < self.MAX_RETRIES:
+                    repair_prompt = (
+                        f"The JSON was invalid: {last_error}. "
+                        "Please fix and return valid JSON only."
+                    )
+                    messages.append({"role": "assistant", "content": raw_output})
+                    messages.append({"role": "user", "content": repair_prompt})
+                    response = ctx.llm.chat(messages)
+                    raw_output = response.content
+
+        call_record.ended_at = ctx.now().isoformat()
+        call_record.error = f"JSON parse failed: {last_error}"
+        execution_log.add_call(call_record)
+        return None
+
+    # ------------------------------------------------------------------
+    # B) Community report generation
+    # ------------------------------------------------------------------
+
+    def _generate_community_reports(
+        self,
+        ctx: "AgentContext",
+        graph: GraphIndex,
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        execution_log: ToolExecutionLog,
+    ) -> None:
+        """Generate LLM summary reports for each community."""
+        for community in graph.communities:
+            call_record = ToolCallRecord(
+                tool="graphrag:community_report",
+                input={"community_id": community.id, "num_entities": len(community.entity_ids)},
+                started_at=ctx.now().isoformat(),
+            )
+
+            # Build community context
+            ent_lines: list[str] = []
+            all_urls: set[str] = set()
+            for eid in community.entity_ids[:15]:
+                ent = graph.entities.get(eid)
+                if ent:
+                    ent_lines.append(f"- {ent.name} ({ent.type}): {ent.description[:120]}")
+                    all_urls.update(ent.source_urls)
+
+            rel_lines: list[str] = []
+            for rel in graph.relations:
+                if rel.head_id in community.entity_ids and rel.tail_id in community.entity_ids:
+                    head_name = graph.entities.get(rel.head_id)
+                    tail_name = graph.entities.get(rel.tail_id)
+                    if head_name and tail_name:
+                        rel_lines.append(
+                            f"- {head_name.name} --[{rel.relation}]--> {tail_name.name}"
+                            f" | \"{rel.quote[:100]}\""
+                        )
+
+            # Collect supporting quotes from text units linked to community entities
+            tu_ids: set[str] = set()
+            for eid in community.entity_ids:
+                ent = graph.entities.get(eid)
+                if ent:
+                    tu_ids.update(ent.text_unit_ids)
+
+            quote_lines: list[str] = []
+            for tu in graph.text_units:
+                if tu.id in tu_ids and len(quote_lines) < 5:
+                    snippet = tu.content[:200].replace("\n", " ")
+                    quote_lines.append(f"- [{tu.doc_url}] {snippet}")
+
+            context_text = (
+                f"### ENTITIES\n" + "\n".join(ent_lines[:15]) + "\n\n"
+                f"### RELATIONS\n" + "\n".join(rel_lines[:10]) + "\n\n"
+                f"### SUPPORTING QUOTES\n" + "\n".join(quote_lines[:5])
+            )
+
+            prompt = (
+                f"Write a community report for this group of related entities.\n\n"
+                f"Market Question: {prompt_spec.market.question}\n"
+                f"Requirement: {requirement.description}\n\n"
+                f"{context_text}"
+            )
+
+            messages = [
+                {"role": "system", "content": GRAPHRAG_COMMUNITY_REPORT_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+
+            try:
+                response = ctx.llm.chat(messages)
+                report_data = self._extract_json(response.content)
+                community.report = json.dumps(report_data, ensure_ascii=False)[:1200]
+            except (json.JSONDecodeError, ValueError):
+                community.report = f"Community {community.id}: {', '.join(community.entity_ids[:5])}"
+
+            call_record.ended_at = ctx.now().isoformat()
+            call_record.output = {"report_length": len(community.report)}
+            execution_log.add_call(call_record)
+
+    # ------------------------------------------------------------------
+    # C-1) Local query: seed entities → neighborhood pack
+    # ------------------------------------------------------------------
+
+    def _query_local(
+        self,
+        ctx: "AgentContext",
+        query_text: str,
+        graph: GraphIndex,
+        execution_log: ToolExecutionLog,
+    ) -> str:
+        """Identify seed entities and build local context pack."""
+        call_record = ToolCallRecord(
+            tool="graphrag:local_pack",
+            input={"query_length": len(query_text)},
+            started_at=ctx.now().isoformat(),
+        )
+
+        # Ask LLM for seed entities
+        messages = [
+            {"role": "system", "content": GRAPHRAG_SEED_ENTITIES_SYSTEM_PROMPT},
+            {"role": "user", "content": query_text},
+        ]
+
+        seed_ids: list[str] = []
+        try:
+            response = ctx.llm.chat(messages)
+            seed_data = self._extract_json(response.content)
+            raw_seeds = seed_data.get("seed_entities", [])
+
+            # Match seeds to graph entities by normalized name
+            for seed in raw_seeds:
+                normalized = normalize_entity_name(str(seed))
+                if normalized in graph.entities:
+                    seed_ids.append(normalized)
+                else:
+                    # Partial match: check if seed is a substring of entity names
+                    for eid in graph.entities:
+                        if normalized and normalized in eid and eid not in seed_ids:
+                            seed_ids.append(eid)
+                            break
+        except (json.JSONDecodeError, ValueError):
+            # Fallback: use query terms as seeds
+            query_terms = set(normalize_entity_name(query_text).split())
+            for eid in graph.entities:
+                if any(t in eid for t in query_terms):
+                    seed_ids.append(eid)
+
+        local_pack = build_local_context_pack(graph, seed_ids[:10], max_chars=4000)
+
+        call_record.ended_at = ctx.now().isoformat()
+        call_record.output = {
+            "seed_entities": seed_ids[:10],
+            "pack_length": len(local_pack),
+        }
+        execution_log.add_call(call_record)
+        return local_pack
+
+    # ------------------------------------------------------------------
+    # C-2) Global query: community MAP → REDUCE
+    # ------------------------------------------------------------------
+
+    def _query_global_map_reduce(
+        self,
+        ctx: "AgentContext",
+        query_text: str,
+        graph: GraphIndex,
+        local_pack: str,
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        current_time_str: str,
+        execution_log: ToolExecutionLog,
+    ) -> dict[str, Any]:
+        """Rank communities, MAP each to partial answer, REDUCE to synthesis."""
+        semantics = prompt_spec.prediction_semantics
+
+        # Rank communities by query overlap
+        query_terms = set(normalize_entity_name(query_text).split())
+        selected = rank_communities_by_query(
+            graph.communities, query_terms, graph.entities,
+            top_m=self.TOP_M_COMMUNITIES,
+        )
+
+        if not selected:
+            # No communities — go straight to reduce with local pack only
+            return self._reduce_step(
+                ctx, [], local_pack, requirement, prompt_spec,
+                current_time_str, execution_log,
+            )
+
+        # MAP step: partial answer per community
+        map_results: list[dict[str, Any]] = []
+        for community in selected:
+            call_record = ToolCallRecord(
+                tool="graphrag:map",
+                input={"community_id": community.id},
+                started_at=ctx.now().isoformat(),
+            )
+
+            prompt = (
+                f"### QUERY\n"
+                f"Market Question: {prompt_spec.market.question}\n"
+                f"Requirement: {requirement.description}\n"
+                f"Entity: {semantics.target_entity}\n"
+                f"Predicate: {semantics.predicate}\n\n"
+                f"### COMMUNITY REPORT (ID: {community.id})\n"
+                f"{community.report}\n\n"
+                f"### TASK\n"
+                f"Produce a partial, query-focused answer from this community report."
+            )
+
+            messages = [
+                {"role": "system", "content": GRAPHRAG_COMMUNITY_MAP_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+
+            try:
+                response = ctx.llm.chat(messages)
+                partial = self._extract_json(response.content)
+                partial["community_id"] = community.id
+                map_results.append(partial)
+
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.output = {
+                    "supports": partial.get("supports"),
+                    "confidence": partial.get("confidence"),
+                }
+            except (json.JSONDecodeError, ValueError):
+                call_record.ended_at = ctx.now().isoformat()
+                call_record.error = "LLM returned invalid JSON for map step"
+
+            execution_log.add_call(call_record)
+
+        # REDUCE step
+        return self._reduce_step(
+            ctx, map_results, local_pack, requirement, prompt_spec,
+            current_time_str, execution_log,
+        )
+
+    def _reduce_step(
+        self,
+        ctx: "AgentContext",
+        map_results: list[dict[str, Any]],
+        local_pack: str,
+        requirement: "DataRequirement",
+        prompt_spec: PromptSpec,
+        current_time_str: str,
+        execution_log: ToolExecutionLog,
+    ) -> dict[str, Any]:
+        """REDUCE: combine MAP outputs + local pack into final synthesis."""
+        call_record = ToolCallRecord(
+            tool="graphrag:reduce",
+            input={
+                "num_map_results": len(map_results),
+                "local_pack_length": len(local_pack),
+            },
+            started_at=ctx.now().isoformat(),
+        )
+
+        semantics = prompt_spec.prediction_semantics
+
+        # Format MAP results
+        map_text_parts: list[str] = []
+        for i, mr in enumerate(map_results):
+            block = (
+                f"COMMUNITY [{mr.get('community_id', i)}]\n"
+                f"SUPPORTS: {mr.get('supports', 'N/A')}\n"
+                f"PARSED_VALUE: {mr.get('parsed_value', 'null')}\n"
+                f"CONFIDENCE: {mr.get('confidence', 0)}\n"
+                f"KEY_FACT: {str(mr.get('key_fact', ''))[:300]}\n"
+                f"MISSING: {mr.get('missing_info', [])}"
+            )
+            map_text_parts.append(block)
+
+        map_text = "\n\n---\n\n".join(map_text_parts) if map_text_parts else "(no community map results)"
+
+        prompt = (
+            f"### CONTEXT\n"
+            f"CURRENT_TIME: {current_time_str}\n"
+            f"Market Question: {prompt_spec.market.question}\n"
+            f"Event Definition: {prompt_spec.market.event_definition}\n"
+            f"Entity: {semantics.target_entity}\n"
+            f"Predicate: {semantics.predicate}\n\n"
+            f"### DATA REQUIREMENT\n"
+            f"{requirement.description}\n\n"
+            f"### LOCAL EVIDENCE PACK (entity-centric)\n"
+            f"{local_pack if local_pack else '(empty)'}\n\n"
+            f"### GLOBAL COMMUNITY MAP RESULTS\n"
+            f"{map_text}\n\n"
+            f"### TASK\n"
+            f"Synthesize the local evidence pack and the community-level partial "
+            f"answers into a single coherent resolution.\n"
+            f"Apply source hierarchy: Tier 1 > Tier 2 > Tier 3.\n"
+            f"If sources conflict, document both sides."
+        )
+
+        messages = [
+            {"role": "system", "content": GRAPHRAG_REDUCE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            response = ctx.llm.chat(messages)
+            synthesis = self._extract_json(response.content)
+
+            call_record.ended_at = ctx.now().isoformat()
+            call_record.output = {
+                "resolution_status": synthesis.get("resolution_status"),
+                "confidence_score": synthesis.get("confidence_score"),
+            }
+            execution_log.add_call(call_record)
+            return synthesis
+
+        except (json.JSONDecodeError, ValueError):
+            call_record.ended_at = ctx.now().isoformat()
+            call_record.error = "LLM returned invalid JSON for reduce step"
+            execution_log.add_call(call_record)
+            return {
+                "resolution_status": "UNRESOLVED",
+                "confidence_score": 0.0,
+                "evidence_sources": [],
+                "conflicts": [],
+                "missing_info": ["Reduce step failed — LLM returned invalid JSON"],
+                "reasoning_trace": "Reduce parse error",
+            }
+
+    # ------------------------------------------------------------------
+    # D) Build final EvidenceItem
+    # ------------------------------------------------------------------
+
+    def _build_evidence_from_synthesis(
+        self,
+        ctx: "AgentContext",
+        req_id: str,
+        market_id: str,
+        synthesis: dict[str, Any],
+        graph: GraphIndex,
+    ) -> EvidenceItem:
+        """Convert synthesis output + graph stats to an EvidenceItem."""
+        evidence_id = hashlib.sha256(
+            f"graphrag:{req_id}:final:{market_id}".encode()
+        ).hexdigest()[:16]
+
+        resolution_status = synthesis.get("resolution_status", "UNRESOLVED")
+        confidence_score = synthesis.get("confidence_score", 0.0)
+        success = (
+            resolution_status in ("RESOLVED", "AMBIGUOUS")
+            and confidence_score >= 0.5
+        )
+
+        raw_sources = synthesis.get("evidence_sources", [])
+        evidence_sources = _normalize_evidence_sources(raw_sources)
+
+        # Build compact community_reports dict (top 2)
+        community_reports: dict[str, str] = {}
+        for c in graph.communities[:2]:
+            if c.report:
+                community_reports[c.id] = c.report[:600]
+
+        reasoning_trace = str(synthesis.get("reasoning_trace", ""))[:500]
+
+        extracted_fields = self._truncate_extracted_fields({
+            "confidence_score": confidence_score,
+            "resolution_status": resolution_status,
+            "evidence_sources": evidence_sources,
+            "graph_stats": graph.stats,
+            "top_entities": sorted(graph.entities.keys())[:10],
+            "selected_communities": [c.id for c in graph.communities[:self.TOP_M_COMMUNITIES]],
+            "community_reports": community_reports,
+            "conflicts": synthesis.get("conflicts", []),
+            "missing_info": synthesis.get("missing_info", []),
+        })
+
+        return EvidenceItem(
+            evidence_id=evidence_id,
+            requirement_id=req_id,
+            provenance=Provenance(
+                source_id="graphrag",
+                source_uri="serper:search+http:fetch+graphrag:index",
+                tier=2,
+                fetched_at=ctx.now(),
+                content_hash=self._hash_content(reasoning_trace),
+            ),
+            raw_content=reasoning_trace,
+            parsed_value=synthesis.get("parsed_value"),
+            extracted_fields=extracted_fields,
+            success=success,
+            error=None if success else f"Resolution status: {resolution_status}",
+        )
+
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
+    def _validate_output(
+        self,
+        bundle: EvidenceBundle,
+        tool_plan: ToolPlan,
+    ) -> VerificationResult:
+        """Validate GraphRAG collection results."""
+        checks: list[CheckResult] = []
+
+        if bundle.has_evidence:
+            checks.append(CheckResult.passed(
+                check_id="has_evidence",
+                message=f"GraphRAG collected {len(bundle.items)} evidence items",
+            ))
+        else:
+            checks.append(CheckResult.failed(
+                check_id="has_evidence",
+                message="No evidence was collected",
+            ))
+
+        # Check graph stats present
+        graph_items = [
+            e for e in bundle.items
+            if e.extracted_fields.get("graph_stats")
+        ]
+        if graph_items:
+            checks.append(CheckResult.passed(
+                check_id="graph_built",
+                message=f"{len(graph_items)} items have graph stats",
+            ))
+
+        resolved_count = sum(
+            1 for e in bundle.items
+            if e.extracted_fields.get("resolution_status") == "RESOLVED"
+        )
+        if resolved_count > 0:
+            checks.append(CheckResult.passed(
+                check_id="synthesis_resolved",
+                message=f"{resolved_count} requirements resolved via GraphRAG",
+            ))
+
+        unfulfilled = bundle.requirements_unfulfilled
+        if not unfulfilled:
+            checks.append(CheckResult.passed(
+                check_id="requirements_fulfilled",
+                message="All requirements fulfilled",
+            ))
+        else:
+            checks.append(CheckResult.warning(
+                check_id="requirements_fulfilled",
+                message=f"Unfulfilled requirements: {unfulfilled}",
+            ))
+
+        ok = all(c.ok for c in checks)
+        return VerificationResult(ok=ok, checks=checks)
+
+    # ------------------------------------------------------------------
+    # Static helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_json(text: str) -> dict[str, Any]:
+        """Extract JSON from LLM response text."""
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if json_match:
+            return json.loads(json_match.group(1).strip())
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            return json.loads(text[start:end])
+        return json.loads(text.strip())
+
+    @staticmethod
+    def _hash_content(content: str) -> str:
+        """Hash content using SHA256."""
+        return hashlib.sha256(content.encode()).hexdigest()
+
+    @staticmethod
+    def _truncate_extracted_fields(
+        fields: dict[str, Any], max_value_len: int = 500
+    ) -> dict[str, Any]:
+        """Truncate extracted field values to prevent oversized evidence."""
+        truncated: dict[str, Any] = {}
+        for key, value in fields.items():
+            if isinstance(value, str) and len(value) > max_value_len:
+                truncated[key] = value[:max_value_len] + "..."
+            else:
+                truncated[key] = value
+        return truncated
+
+
 def _normalize_evidence_sources(raw_sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize LLM-produced evidence source entries to the standard format.
 
@@ -2326,6 +3439,7 @@ def get_collector(
     ctx: "AgentContext",
     *,
     prefer_agentic: bool = False,
+    prefer_graphrag: bool = False,
     prefer_hyde: bool = False,
     prefer_llm: bool = True,
     prefer_http: bool = True,
@@ -2337,16 +3451,19 @@ def get_collector(
     Args:
         ctx: Agent context
         prefer_agentic: If True and LLM + HTTP available, use AgenticRAG collector
+        prefer_graphrag: If True and LLM + HTTP available, use GraphRAG collector
         prefer_hyde: If True and LLM + HTTP available, use HyDE collector
         prefer_llm: If True and LLM client available, use LLM collector
         prefer_http: If True and HTTP client available, use HTTP collector
         mock_responses: Mock responses for mock collector
 
     Returns:
-        CollectorAgenticRAG, CollectorHyDE, CollectorLLM, CollectorHTTP, or CollectorMock
+        CollectorAgenticRAG, CollectorGraphRAG, CollectorHyDE, CollectorLLM, CollectorHTTP, or CollectorMock
     """
     if prefer_agentic and ctx.llm is not None and ctx.http is not None:
         return CollectorAgenticRAG()
+    if prefer_graphrag and ctx.llm is not None and ctx.http is not None:
+        return CollectorGraphRAG()
     if prefer_hyde and ctx.llm is not None and ctx.http is not None:
         return CollectorHyDE()
     if prefer_llm and ctx.llm is not None:
@@ -2389,6 +3506,15 @@ def _register_agents() -> None:
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
         priority=170,  # Highest - AgenticRAG requires both LLM and HTTP
         metadata={"description": "Agentic RAG collector with iterative deep reasoning. Plans queries, retrieves candidates, assesses relevance via LLM, and synthesizes evidence with conflict handling. Produces the highest-quality evidence bundles."},
+    )
+
+    register_agent(
+        step=AgentStep.COLLECTOR,
+        name="CollectorGraphRAG",
+        factory=lambda ctx: CollectorGraphRAG(),
+        capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
+        priority=165,  # Between AgenticRAG (170) and HyDE (160)
+        metadata={"description": "GraphRAG collector implementing Local-to-Global query-focused summarization. Builds an entity-relation graph from retrieved documents, detects communities, generates community reports, and uses MAP-REDUCE over communities for synthesis."},
     )
 
     register_agent(

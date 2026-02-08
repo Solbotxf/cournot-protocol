@@ -18,6 +18,7 @@ Usage:
 from .agent import (
     CollectorHTTP,
     CollectorLLM,
+    CollectorGraphRAG,
     CollectorMock,
     collect_evidence,
     get_collector,
@@ -39,6 +40,7 @@ __all__ = [
     # Agents
     "CollectorHTTP",
     "CollectorLLM",
+    "CollectorGraphRAG",
     "CollectorMock",
     # Functions
     "collect_evidence",

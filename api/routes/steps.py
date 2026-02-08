@@ -82,7 +82,7 @@ class ResolveRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt output)"
     )
-    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG"]] = Field(
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG"]] = Field(
         default=["CollectorLLM"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
@@ -133,7 +133,7 @@ class CollectRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt)"
     )
-    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG"]] = Field(
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG"]] = Field(
         default=["CollectorLLM"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
@@ -298,7 +298,9 @@ async def run_prompt_engineer(request: PromptEngineerRequest) -> PromptEngineerR
     try:
         logger.info(f"Compiling prompt: {request.user_input[:50]}...")
 
-        override = build_llm_override(request.llm_provider, request.llm_model)
+        override = build_llm_override(
+            request.llm_provider, request.llm_model, agent_name="prompt_engineer",
+        )
         ctx = get_agent_context(with_llm=True, llm_override=override)
 
         # Use the LLM agent for prompt compilation
@@ -363,24 +365,29 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
         except Exception as e:
             return ResolveResponse(ok=False, errors=[f"Invalid tool_plan: {e}"])
 
-        # Get context with LLM + HTTP
-        override = build_llm_override(request.llm_provider, request.llm_model)
-        ctx = get_agent_context(with_llm=True, with_http=True, llm_override=override)
         registry = get_registry()
 
         # Step 1: Run multiple collectors
+        # Build a collector-specific context (respects agents.collector.llm_override)
+        collector_override = build_llm_override(
+            request.llm_provider, request.llm_model, agent_name="collector",
+        )
+        collector_ctx = get_agent_context(
+            with_llm=True, with_http=True, llm_override=collector_override,
+        )
+
         evidence_bundles: list[EvidenceBundle] = []
         collectors_used: list[str] = []
 
         for collector_name in request.collectors:
             try:
-                collector = registry.get_agent_by_name(collector_name, ctx)
+                collector = registry.get_agent_by_name(collector_name, collector_ctx)
             except ValueError:
                 errors.append(f"Collector not found: {collector_name}")
                 continue
 
             logger.info(f"Running collector: {collector.name}")
-            result = collector.run(ctx, prompt_spec, tool_plan)
+            result = collector.run(collector_ctx, prompt_spec, tool_plan)
 
             if not result.success:
                 errors.append(f"{collector_name}: {result.error or 'Collection failed'}")
@@ -398,9 +405,16 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
             )
 
         # Step 2: Run auditor
+        # Build an auditor-specific context (respects agents.auditor.llm_override)
+        auditor_override = build_llm_override(
+            request.llm_provider, request.llm_model, agent_name="auditor",
+        )
+        auditor_ctx = get_agent_context(
+            with_llm=True, with_http=True, llm_override=auditor_override,
+        )
         logger.info(f"Running auditor with {len(evidence_bundles)} bundles")
-        auditor = get_auditor(ctx)
-        audit_result = auditor.run(ctx, prompt_spec, evidence_bundles)
+        auditor = get_auditor(auditor_ctx)
+        audit_result = auditor.run(auditor_ctx, prompt_spec, evidence_bundles)
 
         if not audit_result.success:
             return ResolveResponse(
@@ -411,9 +425,16 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
         reasoning_trace = audit_result.output
 
         # Step 3: Run judge
+        # Build a judge-specific context (respects agents.judge.llm_override)
+        judge_override = build_llm_override(
+            request.llm_provider, request.llm_model, agent_name="judge",
+        )
+        judge_ctx = get_agent_context(
+            with_llm=True, with_http=True, llm_override=judge_override,
+        )
         logger.info("Running judge")
-        judge = get_judge(ctx)
-        judge_result = judge.run(ctx, prompt_spec, evidence_bundles, reasoning_trace)
+        judge = get_judge(judge_ctx)
+        judge_result = judge.run(judge_ctx, prompt_spec, evidence_bundles, reasoning_trace)
 
         if not judge_result.success:
             return ResolveResponse(
@@ -498,7 +519,9 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
         except Exception as e:
             return CollectResponse(ok=False, errors=[f"Invalid tool_plan: {e}"])
 
-        override = build_llm_override(request.llm_provider, request.llm_model)
+        override = build_llm_override(
+            request.llm_provider, request.llm_model, agent_name="collector",
+        )
         ctx = get_agent_context(with_llm=True, with_http=True, llm_override=override)
         registry = get_registry()
 
@@ -576,7 +599,9 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
         if not evidence_bundles:
             return AuditResponse(ok=False, errors=["No evidence bundles provided"])
 
-        override = build_llm_override(request.llm_provider, request.llm_model)
+        override = build_llm_override(
+            request.llm_provider, request.llm_model, agent_name="auditor",
+        )
         ctx = get_agent_context(with_llm=True, llm_override=override)
 
         from agents.auditor import get_auditor
@@ -636,7 +661,9 @@ async def run_judge(request: JudgeRequest) -> JudgeResponse:
             return JudgeResponse(ok=False, errors=[f"Invalid reasoning_trace: {e}"])
 
         # Get context with LLM for judge
-        override = build_llm_override(request.llm_provider, request.llm_model)
+        override = build_llm_override(
+            request.llm_provider, request.llm_model, agent_name="judge",
+        )
         ctx = get_agent_context(with_llm=True, llm_override=override)
 
         # Select and run judge agent

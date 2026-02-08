@@ -62,22 +62,58 @@ def _load_runtime_config() -> RuntimeConfig:
 def build_llm_override(
     llm_provider: str | None,
     llm_model: str | None,
+    *,
+    agent_name: str | None = None,
 ) -> LLMConfig | None:
     """Build an LLMConfig override from per-request provider/model.
 
+    Resolution order (first non-None wins):
+      1. Per-request ``llm_provider`` / ``llm_model`` from the API body.
+      2. Per-agent ``llm_override`` from ``cournot.json`` → ``agents.<agent_name>.llm_override``.
+      3. None — the caller falls back to the server-wide default LLM.
+
     API keys are ALWAYS resolved server-side from environment variables.
-    Returns None if no override requested (both args are None).
+
+    Args:
+        llm_provider: Provider requested in the API call (e.g. 'openai').
+        llm_model: Model requested in the API call (e.g. 'gpt-4o').
+        agent_name: Optional agent section name (e.g. 'collector', 'auditor')
+                    used to look up ``agents.<agent_name>.llm_override`` in config.
+
+    Returns:
+        LLMConfig override, or None when no override applies.
 
     Raises:
-        InvalidRequestError: if provider is specified but has no API key configured.
+        InvalidRequestError: if the resolved provider has no API key configured.
     """
-    if llm_provider is None and llm_model is None:
-        return None
+    config = _load_runtime_config()
 
-    # If only model is specified without provider, use the server default provider
-    if llm_provider is None:
-        config = _load_runtime_config()
-        llm_provider = config.llm.provider
+    # --- Tier 2: per-agent config fallback ---
+    agent_override: LLMConfig | None = None
+    if agent_name is not None:
+        agent_cfg = getattr(config.agents, agent_name, None)
+        if agent_cfg is not None:
+            agent_override = agent_cfg.llm_override  # may be None
+
+    # --- Tier 1: per-request values take priority ---
+    if llm_provider is None and llm_model is None:
+        # No request-level override — use agent config if available
+        if agent_override is None:
+            return None
+        # Use agent config, resolving its API key
+        llm_provider = agent_override.provider
+        llm_model = agent_override.model
+    else:
+        # Request provided at least one value; fill gaps from agent config,
+        # then from the server-wide default.
+        if llm_provider is None:
+            llm_provider = (
+                agent_override.provider if agent_override else config.llm.provider
+            )
+        if llm_model is None:
+            llm_model = (
+                agent_override.model if agent_override else None
+            )
 
     # Resolve API key from environment
     env_var = PROVIDER_ENV_KEYS.get(llm_provider.lower())
@@ -93,10 +129,16 @@ def build_llm_override(
             f"(missing {env_var} environment variable)"
         )
 
+    # Carry over base_url from agent config when the provider matches
+    base_url: str | None = None
+    if agent_override and agent_override.provider == llm_provider.lower():
+        base_url = agent_override.base_url
+
     return LLMConfig(
         provider=llm_provider.lower(),
         model=llm_model or PROVIDER_DEFAULT_MODELS.get(llm_provider.lower(), ""),
         api_key=api_key,
+        base_url=base_url,
     )
 
 
