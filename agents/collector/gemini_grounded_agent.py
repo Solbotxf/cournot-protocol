@@ -327,25 +327,39 @@ class CollectorGeminiGrounded(BaseAgent):
         """Create the google-genai client (lazy import)."""
         try:
             from google import genai
+            from google.genai import types as genai_types
         except ImportError:
             raise ImportError(
                 "google-genai package required: pip install google-genai"
             )
-        return genai.Client(api_key=api_key)
+        return genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=80_000),
+        )
 
     def _call_gemini(self, client: Any, prompt: str) -> Any:
-        """Call Gemini with Google Search grounding enabled."""
+        """Call Gemini with Google Search grounding enabled.
+
+        A Python-level timeout (80s) ensures we return before
+        Cloudflare's 100s proxy read timeout triggers a 524.
+        """
+        import concurrent.futures
         from google.genai import types
 
-        return client.models.generate_content(
-            model=self._model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=GEMINI_GROUNDED_SYSTEM_PROMPT,
-                temperature=0.0,
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-            ),
-        )
+        def _do_call() -> Any:
+            return client.models.generate_content(
+                model=self._model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=GEMINI_GROUNDED_SYSTEM_PROMPT,
+                    temperature=0.0,
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                ),
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_do_call)
+            return future.result(timeout=80)  # seconds
 
     @staticmethod
     def _extract_text(response: Any) -> str:

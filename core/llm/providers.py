@@ -261,10 +261,10 @@ class AnthropicProvider(LLMProvider):
 class GoogleProvider(LLMProvider):
     """
     Google Gemini API provider.
-    
-    Requires: google-generativeai package
+
+    Requires: google-genai package (pip install google-genai)
     """
-    
+
     def __init__(
         self,
         model: str = "gemini-2.5-flash",
@@ -274,29 +274,27 @@ class GoogleProvider(LLMProvider):
         self._model = model
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY")
         self._client = None
-    
+
     @property
     def name(self) -> str:
         return "google"
-    
+
     @property
     def model(self) -> str:
         return self._model
-    
+
     def _get_client(self):
-        """Lazy-load Google client."""
+        """Lazy-load Google genai client."""
         if self._client is None:
             try:
-                import google.generativeai as genai
+                from google import genai
             except ImportError:
                 raise ImportError(
-                    "google-generativeai package required: pip install google-generativeai"
+                    "google-genai package required: pip install google-genai"
                 )
-            
-            genai.configure(api_key=self._api_key)
-            self._client = genai.GenerativeModel(self._model)
+            self._client = genai.Client(api_key=self._api_key)
         return self._client
-    
+
     def chat(
         self,
         messages: list[dict[str, Any]],
@@ -304,34 +302,59 @@ class GoogleProvider(LLMProvider):
         policy: DecodingPolicy,
         json_schema: Optional[dict[str, Any]] = None,
     ) -> LLMResponse:
+        from google.genai import types
+
         client = self._get_client()
-        
-        # Convert messages to Gemini format
-        gemini_messages = []
+
+        # Separate system instruction from conversation messages
+        system_parts = []
+        gemini_contents = []
         for msg in messages:
-            role = "user" if msg["role"] in ("user", "system") else "model"
-            gemini_messages.append({"role": role, "parts": [msg["content"]]})
-        
-        generation_config = {
+            if msg["role"] == "system":
+                system_parts.append(msg["content"])
+            else:
+                role = "user" if msg["role"] == "user" else "model"
+                gemini_contents.append(
+                    types.Content(role=role, parts=[types.Part(text=msg["content"])])
+                )
+
+        config_kwargs: dict[str, Any] = {
             "temperature": policy.temperature,
             "max_output_tokens": policy.max_tokens,
             "top_p": policy.top_p,
         }
-        
+        if system_parts:
+            config_kwargs["system_instruction"] = "\n".join(system_parts)
         if json_schema or policy.schema_lock:
-            generation_config["response_mime_type"] = "application/json"
-        
-        response = client.generate_content(
-            gemini_messages,
-            generation_config=generation_config,
+            config_kwargs["response_mime_type"] = "application/json"
+
+        response = client.models.generate_content(
+            model=self._model,
+            contents=gemini_contents,
+            config=types.GenerateContentConfig(**config_kwargs),
         )
-        
+
+        # Extract text from response
+        text = ""
+        for candidate in getattr(response, "candidates", []):
+            content = getattr(candidate, "content", None)
+            if content:
+                for part in getattr(content, "parts", []):
+                    t = getattr(part, "text", None)
+                    if t:
+                        text += t
+
+        # Extract token counts from usage metadata
+        usage = getattr(response, "usage_metadata", None)
+        input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+        output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+
         return LLMResponse(
-            content=response.text,
+            content=text,
             model=self._model,
             provider=self.name,
-            input_tokens=0,  # Gemini doesn't always provide this
-            output_tokens=0,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             finish_reason="stop",
         )
 
