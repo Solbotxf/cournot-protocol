@@ -82,7 +82,7 @@ class ResolveRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt output)"
     )
-    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN"]] = Field(
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorGeminiGrounded"]] = Field(
         default=["CollectorLLM"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
@@ -133,7 +133,7 @@ class CollectRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt)"
     )
-    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN"]] = Field(
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorGeminiGrounded"]] = Field(
         default=["CollectorLLM"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
@@ -567,10 +567,21 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
             )
             pan_collector_instance = PANCollectorAgent(pan_config=pan_cfg)
 
+        # Build GeminiGrounded instance once if requested, injecting model override
+        gemini_grounded_instance = None
+        if "CollectorGeminiGrounded" in request.collectors:
+            from agents.collector.gemini_grounded_agent import CollectorGeminiGrounded
+            kwargs: dict[str, Any] = {}
+            if request.llm_model:
+                kwargs["model"] = request.llm_model
+            gemini_grounded_instance = CollectorGeminiGrounded(**kwargs)
+
         for collector_name in request.collectors:
             try:
                 if collector_name == "CollectorPAN":
                     collector = pan_collector_instance
+                elif collector_name == "CollectorGeminiGrounded":
+                    collector = gemini_grounded_instance
                 else:
                     collector = registry.get_agent_by_name(collector_name, ctx)
             except ValueError:
@@ -597,6 +608,7 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
             logs.append(execution_log.model_dump(mode="json") if execution_log else {})
             collectors_used.append(collector.name)
 
+        logger.info(f"getting bundles size {len(bundles)} and errors: {errors}")
         return CollectResponse(
             ok=len(bundles) > 0,
             collectors_used=collectors_used,

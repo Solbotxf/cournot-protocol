@@ -30,7 +30,7 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "anthropic": "claude-sonnet-4-20250514",
-    "google": "gemini-1.5-pro",
+    "google": "gemini-2.5-flash",
     "grok": "grok-4-fast",
 }
 
@@ -267,7 +267,7 @@ class GoogleProvider(LLMProvider):
     
     def __init__(
         self,
-        model: str = "gemini-1.5-pro",
+        model: str = "gemini-2.5-flash",
         *,
         api_key: Optional[str] = None,
     ) -> None:
@@ -466,7 +466,7 @@ def create_provider(
     elif provider_name == "anthropic":
         return AnthropicProvider(model=model or "claude-sonnet-4-20250514", proxy=proxy, **kwargs)
     elif provider_name == "google":
-        return GoogleProvider(model=model or "gemini-1.5-pro", **kwargs)
+        return GoogleProvider(model=model or "gemini-2.5-flash", **kwargs)
     elif provider_name == "grok":
         return GrokProvider(model=model or "grok-4-latest", proxy=proxy, **kwargs)
     elif provider_name == "mock":

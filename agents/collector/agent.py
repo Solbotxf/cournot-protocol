@@ -3438,6 +3438,7 @@ def _normalize_evidence_sources(raw_sources: list[dict[str, Any]]) -> list[dict[
 def get_collector(
     ctx: "AgentContext",
     *,
+    prefer_gemini_grounded: bool = False,
     prefer_pan: bool = False,
     prefer_agentic: bool = False,
     prefer_graphrag: bool = False,
@@ -3446,12 +3447,14 @@ def get_collector(
     prefer_http: bool = True,
     mock_responses: dict[str, Any] | None = None,
     pan_config: Any | None = None,
+    gemini_model: str | None = None,
 ) -> BaseAgent:
     """
     Get the appropriate collector based on context.
 
     Args:
         ctx: Agent context
+        prefer_gemini_grounded: If True, use Gemini with Google Search grounding
         prefer_pan: If True and LLM + HTTP available, use PAN collector
         prefer_agentic: If True and LLM + HTTP available, use AgenticRAG collector
         prefer_graphrag: If True and LLM + HTTP available, use GraphRAG collector
@@ -3460,10 +3463,17 @@ def get_collector(
         prefer_http: If True and HTTP client available, use HTTP collector
         mock_responses: Mock responses for mock collector
         pan_config: PANCollectorConfig for the PAN collector
+        gemini_model: Override Gemini model for grounded collector
 
     Returns:
-        PANCollectorAgent, CollectorAgenticRAG, CollectorGraphRAG, CollectorHyDE, CollectorLLM, CollectorHTTP, or CollectorMock
+        Appropriate collector agent instance
     """
+    if prefer_gemini_grounded:
+        from .gemini_grounded_agent import CollectorGeminiGrounded
+        kwargs: dict[str, Any] = {}
+        if gemini_model:
+            kwargs["model"] = gemini_model
+        return CollectorGeminiGrounded(**kwargs)
     if prefer_pan and ctx.llm is not None and ctx.http is not None:
         from .pan_agent import PANCollectorAgent
         return PANCollectorAgent(pan_config=pan_config)
@@ -3507,6 +3517,23 @@ def collect_evidence(
 def _register_agents() -> None:
     """Register collector agents."""
     from .pan_agent import PANCollectorAgent
+    from .gemini_grounded_agent import CollectorGeminiGrounded
+
+    register_agent(
+        step=AgentStep.COLLECTOR,
+        name="CollectorGeminiGrounded",
+        factory=lambda ctx: CollectorGeminiGrounded(),
+        capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
+        priority=180,  # Highest — single-call grounded search via Gemini
+        metadata={
+            "description": (
+                "Gemini-grounded collector. Uses Google Gemini with built-in "
+                "Google Search grounding to resolve market questions in a single "
+                "LLM call. Gemini searches the web autonomously and returns a "
+                "grounded answer with citations. Requires GOOGLE_API_KEY."
+            ),
+        },
+    )
 
     register_agent(
         step=AgentStep.COLLECTOR,
