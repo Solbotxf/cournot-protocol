@@ -466,7 +466,8 @@ def create_provider(
     elif provider_name == "anthropic":
         return AnthropicProvider(model=model or "claude-sonnet-4-20250514", proxy=proxy, **kwargs)
     elif provider_name == "google":
-        return GoogleProvider(model=model or "gemini-2.5-flash", **kwargs)
+        google_kwargs = {k: v for k, v in kwargs.items() if k not in ("base_url", "proxy")}
+        return GoogleProvider(model=model or "gemini-2.5-flash", **google_kwargs)
     elif provider_name == "grok":
         return GrokProvider(model=model or "grok-4-latest", proxy=proxy, **kwargs)
     elif provider_name == "mock":

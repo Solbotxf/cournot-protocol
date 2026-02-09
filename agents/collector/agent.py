@@ -3537,6 +3537,15 @@ def _register_agents() -> None:
 
     register_agent(
         step=AgentStep.COLLECTOR,
+        name="CollectorHyDE",
+        factory=lambda ctx: CollectorHyDE(),
+        capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
+        priority=160,  # High - HyDE requires both LLM and HTTP
+        metadata={"description": "Hypothetical Document Embeddings collector. Generates a hypothetical ideal answer first, then searches for real sources that match it. Good for complex or nuanced requirements."},
+    )
+
+    register_agent(
+        step=AgentStep.COLLECTOR,
         name="CollectorPAN",
         factory=lambda ctx: PANCollectorAgent(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
@@ -3568,15 +3577,6 @@ def _register_agents() -> None:
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
         priority=165,  # Between AgenticRAG (170) and HyDE (160)
         metadata={"description": "GraphRAG collector implementing Local-to-Global query-focused summarization. Builds an entity-relation graph from retrieved documents, detects communities, generates community reports, and uses MAP-REDUCE over communities for synthesis."},
-    )
-
-    register_agent(
-        step=AgentStep.COLLECTOR,
-        name="CollectorHyDE",
-        factory=lambda ctx: CollectorHyDE(),
-        capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
-        priority=160,  # High - HyDE requires both LLM and HTTP
-        metadata={"description": "Hypothetical Document Embeddings collector. Generates a hypothetical ideal answer first, then searches for real sources that match it. Good for complex or nuanced requirements."},
     )
 
     register_agent(
