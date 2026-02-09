@@ -24,7 +24,7 @@ class LLMConfig:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     temperature: float = 0.0
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     
     def __post_init__(self):
         # Load API key from environment if not provided

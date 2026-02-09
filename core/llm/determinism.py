@@ -24,7 +24,7 @@ class DecodingPolicy:
     temperature: float = 0.0
     top_p: float = 1.0
     seed: Optional[int] = 42
-    max_tokens: int = 2048
+    max_tokens: int = 8192
     schema_lock: bool = True
     stop_sequences: tuple[str, ...] = field(default_factory=tuple)
     

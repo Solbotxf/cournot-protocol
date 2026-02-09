@@ -344,10 +344,25 @@ class GoogleProvider(LLMProvider):
                     if t:
                         text += t
 
+        # Detect truncated JSON from hitting the output token limit
+        finish_reason = "stop"
+        for candidate in getattr(response, "candidates", []):
+            fr = getattr(candidate, "finish_reason", None)
+            if fr is not None:
+                # google-genai uses enum; normalise to string
+                finish_reason = str(fr).rsplit(".", 1)[-1].lower()
+                break
+
         # Extract token counts from usage metadata
         usage = getattr(response, "usage_metadata", None)
         input_tokens = getattr(usage, "prompt_token_count", 0) or 0
         output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+
+        if finish_reason == "max_tokens" and (json_schema or policy.schema_lock):
+            raise ValueError(
+                f"Gemini response truncated at {output_tokens} output tokens "
+                f"(limit {policy.max_tokens}). Increase max_tokens for this step."
+            )
 
         return LLMResponse(
             content=text,
@@ -355,7 +370,7 @@ class GoogleProvider(LLMProvider):
             provider=self.name,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            finish_reason="stop",
+            finish_reason=finish_reason,
         )
 
 
