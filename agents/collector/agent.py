@@ -3524,7 +3524,7 @@ def _register_agents() -> None:
         name="CollectorGeminiGrounded",
         factory=lambda ctx: CollectorGeminiGrounded(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
-        priority=180,  # Highest — single-call grounded search via Gemini
+        priority=200,  # 1st — single-call grounded search via Gemini
         metadata={
             "description": (
                 "Gemini-grounded collector. Uses Google Gemini with built-in "
@@ -3540,7 +3540,7 @@ def _register_agents() -> None:
         name="CollectorHyDE",
         factory=lambda ctx: CollectorHyDE(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
-        priority=160,  # High - HyDE requires both LLM and HTTP
+        priority=190,  # 2nd — HyDE requires both LLM and HTTP
         metadata={"description": "Hypothetical Document Embeddings collector. Generates a hypothetical ideal answer first, then searches for real sources that match it. Good for complex or nuanced requirements."},
     )
 
@@ -3549,7 +3549,7 @@ def _register_agents() -> None:
         name="CollectorPAN",
         factory=lambda ctx: PANCollectorAgent(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
-        priority=175,  # Above AgenticRAG — PAN wraps workflow with search
+        priority=170,  # 4th — PAN wraps workflow with search
         metadata={
             "description": (
                 "PAN (Program-of-thought with Adaptive search over Nondeterminism) collector. "
@@ -3566,7 +3566,7 @@ def _register_agents() -> None:
         name="CollectorAgenticRAG",
         factory=lambda ctx: CollectorAgenticRAG(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
-        priority=170,  # Highest - AgenticRAG requires both LLM and HTTP
+        priority=160,  # 5th — AgenticRAG requires both LLM and HTTP
         metadata={"description": "Agentic RAG collector with iterative deep reasoning. Plans queries, retrieves candidates, assesses relevance via LLM, and synthesizes evidence with conflict handling. Produces the highest-quality evidence bundles."},
     )
 
@@ -3575,7 +3575,7 @@ def _register_agents() -> None:
         name="CollectorGraphRAG",
         factory=lambda ctx: CollectorGraphRAG(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
-        priority=165,  # Between AgenticRAG (170) and HyDE (160)
+        priority=150,  # 6th — GraphRAG local-to-global summarization
         metadata={"description": "GraphRAG collector implementing Local-to-Global query-focused summarization. Builds an entity-relation graph from retrieved documents, detects communities, generates community reports, and uses MAP-REDUCE over communities for synthesis."},
     )
 
@@ -3584,7 +3584,7 @@ def _register_agents() -> None:
         name="CollectorLLM",
         factory=lambda ctx: CollectorLLM(),
         capabilities={AgentCapability.LLM},
-        priority=150,  # High - preferred when LLM available
+        priority=180,  # 3rd — preferred when LLM available
         metadata={"description": "LLM-based collector that uses web browsing to fetch and interpret URL content. Extracts structured data via LLM with automatic JSON repair. Supports deferred source discovery via search."},
     )
 
@@ -3593,7 +3593,7 @@ def _register_agents() -> None:
         name="CollectorHTTP",
         factory=lambda ctx: CollectorHTTP(),
         capabilities={AgentCapability.NETWORK},
-        priority=100,  # Primary HTTP
+        priority=100,  # 7th — direct HTTP fetch
         metadata={"description": "Direct HTTP collector that fetches data from explicit URLs in the tool plan. No LLM interpretation — returns raw API/page responses. Fast and deterministic."},
     )
 
@@ -3602,7 +3602,7 @@ def _register_agents() -> None:
         name="CollectorMock",
         factory=lambda ctx: CollectorMock(),
         capabilities={AgentCapability.DETERMINISTIC, AgentCapability.REPLAY},
-        priority=50,  # Fallback
+        priority=50,  # 8th — fallback mock
         is_fallback=True,
         metadata={"description": "Mock collector for testing and replay. Returns predetermined responses without making real network requests."},
     )
