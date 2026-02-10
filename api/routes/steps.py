@@ -567,14 +567,11 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
             )
             pan_collector_instance = PANCollectorAgent(pan_config=pan_cfg)
 
-        # Build GeminiGrounded instance once if requested, injecting model override
+        # Build GeminiGrounded instance once if requested (always uses its own default model/provider)
         gemini_grounded_instance = None
         if "CollectorGeminiGrounded" in request.collectors:
             from agents.collector.gemini_grounded_agent import CollectorGeminiGrounded
-            kwargs: dict[str, Any] = {}
-            if request.llm_model:
-                kwargs["model"] = request.llm_model
-            gemini_grounded_instance = CollectorGeminiGrounded(**kwargs)
+            gemini_grounded_instance = CollectorGeminiGrounded()
 
         for collector_name in request.collectors:
             try:
