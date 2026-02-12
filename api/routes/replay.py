@@ -6,6 +6,7 @@ Replay evidence collection and verify against original pack.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import tempfile
 from pathlib import Path
@@ -168,16 +169,16 @@ async def replay_pack(
         # Load pack with hash verification
         logger.info(f"Loading pack: {file.filename}")
         try:
-            package = load_pack(tmp_path, verify_hashes=True)
+            package = await asyncio.to_thread(load_pack, tmp_path, True)
         except PackIOError as e:
             raise InvalidPackError(f"Failed to load pack: {str(e)}")
-        
+
         # Replay evidence
-        replay_ok, replayed_root, divergences = replay_evidence(package, timeout_s)
-        
+        replay_ok, replayed_root, divergences = await asyncio.to_thread(replay_evidence, package, timeout_s)
+
         # Sentinel verification
         logger.info("Running sentinel verification...")
-        sentinel_ok, sentinel_checks, challenges, errors = run_sentinel_verification(package)
+        sentinel_ok, sentinel_checks, challenges, errors = await asyncio.to_thread(run_sentinel_verification, package)
         
         # Build divergence info if there are divergences
         divergence_info = None

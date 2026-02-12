@@ -6,6 +6,7 @@ Execute the pipeline and return results.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import tempfile
@@ -138,7 +139,7 @@ async def run_pipeline(request: RunRequest):
             with_http=True,
         )
         
-        result = pipeline.run(request.user_input)
+        result = await asyncio.to_thread(pipeline.run, request.user_input)
         
         # Check for pipeline errors
         if not result.ok and result.errors:

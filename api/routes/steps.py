@@ -14,6 +14,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Literal
 
@@ -82,7 +83,7 @@ class ResolveRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt output)"
     )
-    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorGeminiGrounded"]] = Field(
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorGeminiGrounded", "CollectorCRP"]] = Field(
         default=["CollectorLLM"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
@@ -133,7 +134,7 @@ class CollectRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt)"
     )
-    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorGeminiGrounded"]] = Field(
+    collectors: list[Literal["CollectorLLM", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorGeminiGrounded", "CollectorCRP"]] = Field(
         default=["CollectorLLM"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
@@ -327,7 +328,7 @@ async def run_prompt_engineer(request: PromptEngineerRequest) -> PromptEngineerR
         from agents.prompt_engineer import PromptEngineerLLM
 
         agent = PromptEngineerLLM(strict_mode=request.strict_mode)
-        result = agent.run(ctx, request.user_input)
+        result = await asyncio.to_thread(agent.run, ctx, request.user_input)
         
         if not result.success:
             return PromptEngineerResponse(
@@ -399,15 +400,30 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
         evidence_bundles: list[EvidenceBundle] = []
         collectors_used: list[str] = []
 
+        # Build CRP context with Gemini LLM if requested
+        crp_resolve_ctx = None
+        if "CollectorCRP" in request.collectors:
+            crp_resolve_override = build_llm_override(
+                "google", "gemini-3-pro-preview", agent_name="collector",
+            )
+            crp_resolve_ctx = get_agent_context(
+                with_llm=True, with_http=True, llm_override=crp_resolve_override,
+            )
+
         for collector_name in request.collectors:
             try:
-                collector = registry.get_agent_by_name(collector_name, collector_ctx)
+                if collector_name == "CollectorCRP":
+                    from agents.collector.crp_agent import CollectorCRP
+                    collector = CollectorCRP()
+                else:
+                    collector = registry.get_agent_by_name(collector_name, collector_ctx)
             except ValueError:
                 errors.append(f"Collector not found: {collector_name}")
                 continue
 
             logger.info(f"Running collector: {collector.name}")
-            result = collector.run(collector_ctx, prompt_spec, tool_plan)
+            run_ctx = crp_resolve_ctx if collector_name == "CollectorCRP" else collector_ctx
+            result = await asyncio.to_thread(collector.run, run_ctx, prompt_spec, tool_plan)
 
             if not result.success:
                 errors.append(f"{collector_name}: {result.error or 'Collection failed'}")
@@ -434,7 +450,7 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
         )
         logger.info(f"Running auditor with {len(evidence_bundles)} bundles")
         auditor = get_auditor(auditor_ctx)
-        audit_result = auditor.run(auditor_ctx, prompt_spec, evidence_bundles)
+        audit_result = await asyncio.to_thread(auditor.run, auditor_ctx, prompt_spec, evidence_bundles)
 
         if not audit_result.success:
             return ResolveResponse(
@@ -454,7 +470,7 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
         )
         logger.info("Running judge")
         judge = get_judge(judge_ctx)
-        judge_result = judge.run(judge_ctx, prompt_spec, evidence_bundles, reasoning_trace)
+        judge_result = await asyncio.to_thread(judge.run, judge_ctx, prompt_spec, evidence_bundles, reasoning_trace)
 
         if not judge_result.success:
             return ResolveResponse(
@@ -573,12 +589,25 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
             from agents.collector.gemini_grounded_agent import CollectorGeminiGrounded
             gemini_grounded_instance = CollectorGeminiGrounded()
 
+        # Build CRP instance with Gemini LLM context (default: gemini-2.5-flash)
+        crp_collector_instance = None
+        crp_ctx = None
+        if "CollectorCRP" in request.collectors:
+            from agents.collector.crp_agent import CollectorCRP
+            crp_collector_instance = CollectorCRP()
+            crp_override = build_llm_override(
+                "google", "gemini-2.5-flash", agent_name="collector",
+            )
+            crp_ctx = get_agent_context(with_llm=True, with_http=True, llm_override=crp_override)
+
         for collector_name in request.collectors:
             try:
                 if collector_name == "CollectorPAN":
                     collector = pan_collector_instance
                 elif collector_name == "CollectorGeminiGrounded":
                     collector = gemini_grounded_instance
+                elif collector_name == "CollectorCRP":
+                    collector = crp_collector_instance
                 else:
                     collector = registry.get_agent_by_name(collector_name, ctx)
             except ValueError:
@@ -586,7 +615,9 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
                 continue
 
             logger.info(f"Running collector: {collector.name}")
-            result = collector.run(ctx, prompt_spec, tool_plan)
+            # CRP uses its own Gemini-backed context
+            run_ctx = crp_ctx if collector_name == "CollectorCRP" else ctx
+            result = await asyncio.to_thread(collector.run, run_ctx, prompt_spec, tool_plan)
 
             if not result.success:
                 errors.append(f"{collector_name}: {result.error or 'Collection failed'}")
@@ -657,7 +688,7 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
         auditor = get_auditor(ctx)
         logger.info(f"Using auditor: {auditor.name}")
 
-        result = auditor.run(ctx, prompt_spec, evidence_bundles)
+        result = await asyncio.to_thread(auditor.run, ctx, prompt_spec, evidence_bundles)
 
         if not result.success:
             return AuditResponse(ok=False, errors=[result.error or "Audit failed"])
@@ -721,7 +752,7 @@ async def run_judge(request: JudgeRequest) -> JudgeResponse:
         judge = get_judge(ctx)
         logger.info(f"Using judge: {judge.name}")
 
-        result = judge.run(ctx, prompt_spec, evidence_bundles, reasoning_trace)
+        result = await asyncio.to_thread(judge.run, ctx, prompt_spec, evidence_bundles, reasoning_trace)
 
         if not result.success:
             return JudgeResponse(ok=False, errors=[result.error or "Judge failed"])
@@ -786,10 +817,11 @@ async def run_bundle(request: BundleRequest) -> BundleResponse:
             return BundleResponse(ok=False, errors=[f"Invalid verdict: {e}"])
 
         # Compute roots
-        roots = compute_roots(prompt_spec, evidence_bundle, reasoning_trace, verdict)
+        roots = await asyncio.to_thread(compute_roots, prompt_spec, evidence_bundle, reasoning_trace, verdict)
 
         # Build PoR bundle
-        por_bundle = build_por_bundle(
+        por_bundle = await asyncio.to_thread(
+            build_por_bundle,
             prompt_spec,
             evidence_bundle,
             reasoning_trace,
