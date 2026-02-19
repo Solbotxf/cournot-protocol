@@ -410,6 +410,9 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
                 with_llm=True, with_http=True, llm_override=crp_resolve_override,
             )
 
+        # Build collector instances and launch all concurrently
+        tasks = []
+        task_names = []
         for collector_name in request.collectors:
             try:
                 if collector_name == "CollectorCRP":
@@ -421,18 +424,25 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
                 errors.append(f"Collector not found: {collector_name}")
                 continue
 
-            logger.info(f"Running collector: {collector.name}")
             run_ctx = crp_resolve_ctx if collector_name == "CollectorCRP" else collector_ctx
-            result = await asyncio.to_thread(collector.run, run_ctx, prompt_spec, tool_plan)
+            logger.info(f"Launching collector: {collector.name}")
+            tasks.append(asyncio.to_thread(collector.run, run_ctx, prompt_spec, tool_plan))
+            task_names.append(collector.name)
 
-            if not result.success:
-                errors.append(f"{collector_name}: {result.error or 'Collection failed'}")
+        # Run all collectors concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for name, result in zip(task_names, results):
+            if isinstance(result, Exception):
+                errors.append(f"{name}: {result}")
                 continue
-
+            if not result.success:
+                errors.append(f"{name}: {result.error or 'Collection failed'}")
+                continue
             bundle, _ = result.output
-            bundle.collector_name = collector.name
+            bundle.collector_name = name
             evidence_bundles.append(bundle)
-            collectors_used.append(collector.name)
+            collectors_used.append(name)
 
         if not evidence_bundles:
             return ResolveResponse(
@@ -566,8 +576,8 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
         collectors_used = []
         errors = []
 
-        # Build PAN config once if any collector is CollectorPAN
-        pan_collector_instance = None
+        # Build PAN config once (shared across duplicate CollectorPAN entries)
+        pan_cfg = None
         if "CollectorPAN" in request.collectors:
             from agents.collector.pan_agent import PANCollectorAgent, PANCollectorConfig
             from core.config import RuntimeConfig
@@ -581,50 +591,56 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
                 max_expansions=server_cfg.pan.max_expansions,
                 seed=request.pan_seed if request.pan_seed is not None else server_cfg.pan.seed,
             )
-            pan_collector_instance = PANCollectorAgent(pan_config=pan_cfg)
 
-        # Build GeminiGrounded instance once if requested (always uses its own default model/provider)
-        gemini_grounded_instance = None
-        if "CollectorGeminiGrounded" in request.collectors:
-            from agents.collector.gemini_grounded_agent import CollectorGeminiGrounded
-            gemini_grounded_instance = CollectorGeminiGrounded()
-
-        # Build CRP instance with Gemini LLM context (default: gemini-2.5-flash)
-        crp_collector_instance = None
+        # Build CRP context once (shared across duplicate CollectorCRP entries)
         crp_ctx = None
         if "CollectorCRP" in request.collectors:
-            from agents.collector.crp_agent import CollectorCRP
-            crp_collector_instance = CollectorCRP()
             crp_override = build_llm_override(
                 "google", "gemini-2.5-flash", agent_name="collector",
             )
             crp_ctx = get_agent_context(with_llm=True, with_http=True, llm_override=crp_override)
 
+        # Build collector instances and launch all concurrently
+        tasks = []
+        task_names = []
         for collector_name in request.collectors:
             try:
+                # Create a fresh instance per entry so duplicates
+                # run independently without sharing mutable state.
                 if collector_name == "CollectorPAN":
-                    collector = pan_collector_instance
+                    from agents.collector.pan_agent import PANCollectorAgent
+                    collector = PANCollectorAgent(pan_config=pan_cfg)
                 elif collector_name == "CollectorGeminiGrounded":
-                    collector = gemini_grounded_instance
+                    from agents.collector.gemini_grounded_agent import CollectorGeminiGrounded
+                    collector = CollectorGeminiGrounded()
                 elif collector_name == "CollectorCRP":
-                    collector = crp_collector_instance
+                    from agents.collector.crp_agent import CollectorCRP
+                    collector = CollectorCRP()
                 else:
                     collector = registry.get_agent_by_name(collector_name, ctx)
             except ValueError:
                 errors.append(f"Collector not found: {collector_name}")
                 continue
 
-            logger.info(f"Running collector: {collector.name}")
             # CRP uses its own Gemini-backed context
             run_ctx = crp_ctx if collector_name == "CollectorCRP" else ctx
-            result = await asyncio.to_thread(collector.run, run_ctx, prompt_spec, tool_plan)
+            logger.info(f"Launching collector: {collector.name}")
+            tasks.append(asyncio.to_thread(collector.run, run_ctx, prompt_spec, tool_plan))
+            task_names.append(collector.name)
 
+        # Run all collectors concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for name, result in zip(task_names, results):
+            if isinstance(result, Exception):
+                errors.append(f"{name}: {result}")
+                continue
             if not result.success:
-                errors.append(f"{collector_name}: {result.error or 'Collection failed'}")
+                errors.append(f"{name}: {result.error or 'Collection failed'}")
                 continue
 
             evidence_bundle, execution_log = result.output
-            evidence_bundle.collector_name = collector.name
+            evidence_bundle.collector_name = name
 
             eb_dict = evidence_bundle.model_dump(mode="json")
             if not request.include_raw_content:
@@ -634,7 +650,7 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
 
             bundles.append(eb_dict)
             logs.append(execution_log.model_dump(mode="json") if execution_log else {})
-            collectors_used.append(collector.name)
+            collectors_used.append(name)
 
         logger.info(f"getting bundles size {len(bundles)} and errors: {errors}")
         return CollectResponse(
