@@ -27,6 +27,7 @@ from .agent import (
 from .pan_agent import PANCollectorAgent, PANCollectorConfig
 from .pan_runtime import SearchAlgo, SearchConfig
 from .gemini_grounded_agent import CollectorGeminiGrounded
+from .crp_agent import CollectorCRP
 
 from .engine import CollectionEngine
 
@@ -48,6 +49,7 @@ __all__ = [
     "CollectorMock",
     "PANCollectorAgent",
     "CollectorGeminiGrounded",
+    "CollectorCRP",
     # PAN config / runtime
     "PANCollectorConfig",
     "SearchAlgo",

@@ -3518,6 +3518,7 @@ def _register_agents() -> None:
     """Register collector agents."""
     from .pan_agent import PANCollectorAgent
     from .gemini_grounded_agent import CollectorGeminiGrounded
+    from .crp_agent import CollectorCRP
 
     register_agent(
         step=AgentStep.COLLECTOR,
@@ -3537,10 +3538,26 @@ def _register_agents() -> None:
 
     register_agent(
         step=AgentStep.COLLECTOR,
+        name="CollectorCRP",
+        factory=lambda ctx: CollectorCRP(),
+        capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
+        priority=195,  # 2nd — 4-phase Cognitive Resolution Pipeline
+        metadata={
+            "description": (
+                "Cognitive Resolution Pipeline collector. 4-phase structured "
+                "reasoning: Contract Clerk (parse) -> Investigator (search) -> "
+                "Auditor (extract) -> Judge (adjudicate). Each phase is a "
+                "separate LLM call with a focused prompt to prevent hallucination."
+            ),
+        },
+    )
+
+    register_agent(
+        step=AgentStep.COLLECTOR,
         name="CollectorHyDE",
         factory=lambda ctx: CollectorHyDE(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
-        priority=190,  # 2nd — HyDE requires both LLM and HTTP
+        priority=190,  # 3rd — HyDE requires both LLM and HTTP
         metadata={"description": "Hypothetical Document Embeddings collector. Generates a hypothetical ideal answer first, then searches for real sources that match it. Good for complex or nuanced requirements."},
     )
 

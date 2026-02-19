@@ -171,7 +171,7 @@ POST /step/collect
 
 Run evidence collection using one or more collectors. Pass the `prompt_spec` and `tool_plan` from the prompt step.
 
-Available collectors: `CollectorLLM`, `CollectorHyDE`, `CollectorHTTP`, `CollectorMock`, `CollectorAgenticRAG`, `CollectorGraphRAG`.
+Available collectors: `CollectorLLM`, `CollectorHyDE`, `CollectorHTTP`, `CollectorMock`, `CollectorAgenticRAG`, `CollectorGraphRAG`, `CollectorPAN`, `CollectorGeminiGrounded`, `CollectorCRP`.
 
 **Request Body:**
 ```json
