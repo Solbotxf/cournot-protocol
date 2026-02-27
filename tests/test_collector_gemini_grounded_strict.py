@@ -888,6 +888,35 @@ def _create_shots_spec() -> PromptSpec:
     )
 
 
+def _mock_fotmob_extractor(match_data=None, error=None):
+    """Build a mock SiteExtractor for fotmob that returns given data or raises."""
+    from agents.collector.extractors.base import ExtractionError
+    from agents.collector.fotmob import summarize_for_llm as fotmob_summarize_for_llm
+
+    ext = MagicMock()
+    ext.source_id = "fotmob"
+    ext.can_handle.return_value = True
+
+    if error is not None:
+        ext.extract_and_summarize.side_effect = ExtractionError(str(error))
+    elif match_data is not None:
+        summary = fotmob_summarize_for_llm(match_data)
+        metadata = {
+            "fotmob_url": match_data.url,
+            "fotmob_match_id": match_data.match_id,
+            "fotmob_home_team": match_data.home_team,
+            "fotmob_away_team": match_data.away_team,
+            "fotmob_home_score": match_data.home_score,
+            "fotmob_away_score": match_data.away_score,
+            "fotmob_stats_categories": list(match_data.stats_by_category.keys()),
+            "fotmob_shots_count": len(match_data.shots),
+            "fotmob_events_count": len(match_data.events),
+        }
+        ext.extract_and_summarize.return_value = (summary, metadata)
+
+    return ext
+
+
 class TestFotMobDirectExtraction:
     """Test the fotmob direct extraction phase (Phase 1.5) with LLM resolution."""
 
@@ -904,11 +933,12 @@ class TestFotMobDirectExtraction:
             outcome="Yes", reason="Real Madrid had 8 shots outside box, threshold is 5."
         )
 
+        mock_ext = _mock_fotmob_extractor(_make_fotmob_match_data())
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
              patch.object(agent, "_get_client", return_value=mock_client), \
              patch.object(agent, "_serper_discover_urls", return_value=discovered), \
-             patch("agents.collector.gemini_grounded_strict_agent.fotmob_fetch_match_stats",
-                   return_value=_make_fotmob_match_data()):
+             patch("agents.collector.gemini_grounded_strict_agent.find_extractor",
+                   return_value=mock_ext):
             ctx = AgentContext.create_minimal()
             ctx.http = MagicMock()
             spec = _create_shots_spec()
@@ -939,11 +969,12 @@ class TestFotMobDirectExtraction:
             outcome="No", reason="Real Madrid had only 3 shots outside box, below threshold of 5."
         )
 
+        mock_ext = _mock_fotmob_extractor(_make_fotmob_match_data())
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
              patch.object(agent, "_get_client", return_value=mock_client), \
              patch.object(agent, "_serper_discover_urls", return_value=discovered), \
-             patch("agents.collector.gemini_grounded_strict_agent.fotmob_fetch_match_stats",
-                   return_value=_make_fotmob_match_data()):
+             patch("agents.collector.gemini_grounded_strict_agent.find_extractor",
+                   return_value=mock_ext):
             ctx = AgentContext.create_minimal()
             ctx.http = MagicMock()
             spec = _create_shots_spec()
@@ -969,14 +1000,15 @@ class TestFotMobDirectExtraction:
 
         agent = CollectorGeminiGroundedStrict()
 
-        from agents.collector.fotmob import FotMobExtractionError
+        mock_ext = _mock_fotmob_extractor(error="Page structure changed")
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
              patch.object(agent, "_get_client", return_value=MagicMock()), \
              patch.object(agent, "_serper_discover_urls", return_value=discovered), \
-             patch("agents.collector.gemini_grounded_strict_agent.fotmob_fetch_match_stats",
-                   side_effect=FotMobExtractionError("Page structure changed")), \
+             patch("agents.collector.gemini_grounded_strict_agent.find_extractor",
+                   return_value=mock_ext), \
              patch.object(agent, "_call_gemini_strict", return_value=gemini_resp):
             ctx = AgentContext.create_minimal()
+            ctx.http = MagicMock()
             spec = _create_shots_spec()
             result = agent.run(ctx, spec, ToolPlan(
                 plan_id="tp_shots", requirements=["req_shots_001"], sources=["web"],
@@ -1048,11 +1080,12 @@ class TestFotMobDirectExtraction:
             reason="Arsenal scored a goal from corner (Saka, 15') per the shotmap data.",
         )
 
+        mock_ext = _mock_fotmob_extractor(corner_data)
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
              patch.object(agent, "_get_client", return_value=mock_client), \
              patch.object(agent, "_serper_discover_urls", return_value=discovered), \
-             patch("agents.collector.gemini_grounded_strict_agent.fotmob_fetch_match_stats",
-                   return_value=corner_data):
+             patch("agents.collector.gemini_grounded_strict_agent.find_extractor",
+                   return_value=mock_ext):
             ctx = AgentContext.create_minimal()
             ctx.http = MagicMock()
             result = agent.run(ctx, _create_spec_with_sources(), _create_tool_plan())
@@ -1080,11 +1113,12 @@ class TestFotMobDirectExtraction:
         # Phase 1.5 LLM call raises timeout
         mock_client.models.generate_content.side_effect = TimeoutError("LLM timeout")
 
+        mock_ext = _mock_fotmob_extractor(_make_fotmob_match_data())
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
              patch.object(agent, "_get_client", return_value=mock_client), \
              patch.object(agent, "_serper_discover_urls", return_value=discovered), \
-             patch("agents.collector.gemini_grounded_strict_agent.fotmob_fetch_match_stats",
-                   return_value=_make_fotmob_match_data()), \
+             patch("agents.collector.gemini_grounded_strict_agent.find_extractor",
+                   return_value=mock_ext), \
              patch.object(agent, "_call_gemini_strict", return_value=gemini_resp):
             ctx = AgentContext.create_minimal()
             ctx.http = MagicMock()
