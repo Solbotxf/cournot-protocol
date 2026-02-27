@@ -187,3 +187,89 @@ class TestFetchMatchStats:
         headers = call_kwargs.kwargs.get("headers", {})
         assert "User-Agent" in headers
         assert "Mozilla" in headers["User-Agent"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: find_stat
+# ---------------------------------------------------------------------------
+
+class TestFindStat:
+
+    def _make_data(self) -> FotMobMatchData:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = SAMPLE_HTML
+        mock_http = MagicMock()
+        mock_http.get.return_value = mock_resp
+        return fetch_match_stats("https://www.fotmob.com/matches/x", mock_http)
+
+    def test_finds_by_exact_title(self):
+        data = self._make_data()
+        stat = find_stat(data, "Shots outside box")
+        assert stat is not None
+        assert stat.home_value == 2
+        assert stat.away_value == 8
+        assert stat.category == "shots"
+
+    def test_finds_by_title_case_insensitive(self):
+        data = self._make_data()
+        stat = find_stat(data, "shots OUTSIDE BOX")
+        assert stat is not None
+        assert stat.away_value == 8
+
+    def test_finds_by_key_fallback(self):
+        data = self._make_data()
+        stat = find_stat(data, "shots_outside_box")
+        assert stat is not None
+        assert stat.away_value == 8
+
+    def test_finds_stat_in_different_category(self):
+        data = self._make_data()
+        stat = find_stat(data, "Accurate passes")
+        assert stat is not None
+        assert stat.category == "passes"
+
+    def test_returns_none_for_missing_stat(self):
+        data = self._make_data()
+        stat = find_stat(data, "Nonexistent stat")
+        assert stat is None
+
+    def test_skips_title_type_entries(self):
+        """The 'Shots' title entry (type=title) should not be returned."""
+        data = self._make_data()
+        stat = find_stat(data, "Shots")
+        # Should find the 'top_stats' category "Total shots" or similar,
+        # NOT the title-type "Shots" entry
+        if stat is not None:
+            assert stat.home_value is not None  # not None like title entries
+
+
+# ---------------------------------------------------------------------------
+# Tests: match_team
+# ---------------------------------------------------------------------------
+
+class TestMatchTeam:
+
+    def _make_data(self) -> FotMobMatchData:
+        return FotMobMatchData(
+            match_id="123",
+            home_team="Osasuna",
+            away_team="Real Madrid",
+        )
+
+    def test_exact_match_home(self):
+        assert match_team(self._make_data(), "Osasuna") == "home"
+
+    def test_exact_match_away(self):
+        assert match_team(self._make_data(), "Real Madrid") == "away"
+
+    def test_case_insensitive(self):
+        assert match_team(self._make_data(), "real madrid") == "away"
+        assert match_team(self._make_data(), "OSASUNA") == "home"
+
+    def test_substring_match(self):
+        assert match_team(self._make_data(), "Real") == "away"
+        assert match_team(self._make_data(), "Madrid") == "away"
+
+    def test_no_match(self):
+        assert match_team(self._make_data(), "Barcelona") is None
