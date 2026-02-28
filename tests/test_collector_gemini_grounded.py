@@ -1,5 +1,5 @@
 """
-Tests for CollectorGeminiGrounded.
+Tests for CollectorOpenSearch.
 
 Tests the Gemini-grounded collector with a mock Gemini client to
 verify prompt construction, response parsing, grounding extraction,
@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from agents.context import AgentContext
 from agents.collector.gemini_grounded_agent import (
-    CollectorGeminiGrounded,
+    CollectorOpenSearch,
     _build_user_prompt,
     _build_targeted_source_prompt,
     _extract_required_domains,
@@ -164,22 +164,22 @@ class TestResponseParsing:
 
     def test_parse_clean_json(self):
         text = '{"outcome": "Yes", "reason": "It launched."}'
-        parsed = CollectorGeminiGrounded._parse_json(text)
+        parsed = CollectorOpenSearch._parse_json(text)
         assert parsed["outcome"] == "Yes"
 
     def test_parse_markdown_fenced_json(self):
         text = '```json\n{"outcome": "No", "reason": "Not yet."}\n```'
-        parsed = CollectorGeminiGrounded._parse_json(text)
+        parsed = CollectorOpenSearch._parse_json(text)
         assert parsed["outcome"] == "No"
 
     def test_parse_json_with_surrounding_text(self):
         text = 'Here is the result: {"outcome": "Yes", "reason": "Done."} end.'
-        parsed = CollectorGeminiGrounded._parse_json(text)
+        parsed = CollectorOpenSearch._parse_json(text)
         assert parsed["outcome"] == "Yes"
 
     def test_parse_invalid_json_raises(self):
         with pytest.raises((json.JSONDecodeError, ValueError)):
-            CollectorGeminiGrounded._parse_json("not json at all")
+            CollectorOpenSearch._parse_json("not json at all")
 
 
 class TestGroundingExtraction:
@@ -187,19 +187,19 @@ class TestGroundingExtraction:
 
     def test_extract_sources(self):
         resp = _mock_gemini_response()
-        grounding = CollectorGeminiGrounded._extract_grounding(resp)
+        grounding = CollectorOpenSearch._extract_grounding(resp)
         assert len(grounding["sources"]) == 1
         assert "counter-strike.net" in grounding["sources"][0]["uri"]
 
     def test_extract_search_queries(self):
         resp = _mock_gemini_response()
-        grounding = CollectorGeminiGrounded._extract_grounding(resp)
+        grounding = CollectorOpenSearch._extract_grounding(resp)
         assert len(grounding["search_queries"]) == 1
         assert "Premier Season 4" in grounding["search_queries"][0]
 
     def test_extract_text(self):
         resp = _mock_gemini_response(outcome="No", reason="Not launched.")
-        text = CollectorGeminiGrounded._extract_text(resp)
+        text = CollectorOpenSearch._extract_text(resp)
         parsed = json.loads(text)
         assert parsed["outcome"] == "No"
 
@@ -212,12 +212,12 @@ class TestGroundingExtraction:
         response = MagicMock()
         response.candidates = [candidate]
 
-        grounding = CollectorGeminiGrounded._extract_grounding(response)
+        grounding = CollectorOpenSearch._extract_grounding(response)
         assert grounding["sources"] == []
         assert grounding["search_queries"] == []
 
 
-class TestCollectorGeminiGrounded:
+class TestCollectorOpenSearch:
     """Integration tests with mocked Gemini client."""
 
     def _run_with_mock(self, mock_response):
@@ -225,7 +225,7 @@ class TestCollectorGeminiGrounded:
         mock_client = MagicMock()
         mock_client.models.generate_content.return_value = mock_response
 
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
 
         # Patch env for API key, plus _get_client and _call_gemini to avoid importing google.genai
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
@@ -270,17 +270,17 @@ class TestCollectorGeminiGrounded:
 
         _, exec_log = result.output
         assert len(exec_log.calls) == 1
-        assert exec_log.calls[0].tool == "gemini_grounded:search_and_resolve"
+        assert exec_log.calls[0].tool == "open_search:search_and_resolve"
 
     def test_metadata_includes_collector_info(self):
         resp = _mock_gemini_response("Yes", "Done.")
         result, _ = self._run_with_mock(resp)
 
-        assert result.metadata["collector"] == "gemini_grounded"
+        assert result.metadata["collector"] == "open_search"
         assert result.metadata["model"] == "gemini-2.5-flash"
 
     def test_no_api_key_returns_failure(self):
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
         ctx = AgentContext.create_minimal()
         # No GOOGLE_API_KEY in env, no config, no explicit key
         with patch.dict("os.environ", {}, clear=True):
@@ -289,7 +289,7 @@ class TestCollectorGeminiGrounded:
         assert "API key" in result.error
 
     def test_gemini_error_returns_failure_evidence(self):
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
 
         mock_client = MagicMock()
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
@@ -309,7 +309,7 @@ class TestCollectorGeminiGrounded:
         resp = _mock_gemini_response("Yes", "Found.")
         mock_client = MagicMock()
 
-        agent = CollectorGeminiGrounded(model="gemini-2.5-pro")
+        agent = CollectorOpenSearch(model="gemini-2.5-pro")
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
              patch.object(agent, "_get_client", return_value=mock_client), \
              patch.object(agent, "_call_gemini", return_value=resp):
@@ -547,7 +547,7 @@ class TestTwoPassCollection:
             source_uri="https://www.fotmob.com/matches/123",
         )
 
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
         call_count = 0
 
         def mock_call(client, prompt):
@@ -580,7 +580,7 @@ class TestTwoPassCollection:
             source_title="FotMob Match Stats",
         )
 
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
         call_count = 0
 
         def mock_call(client, prompt):
@@ -609,7 +609,7 @@ class TestTwoPassCollection:
             source_uri="https://flashscore.com/match/123",
         )
 
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
         call_count = 0
 
         def mock_call(client, prompt):
@@ -637,7 +637,7 @@ class TestTwoPassCollection:
             source_uri="https://www.fotmob.com/matches/stats",
         )
 
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
              patch.object(agent, "_get_client", return_value=MagicMock()), \
              patch.object(agent, "_call_gemini", return_value=resp):
@@ -657,7 +657,7 @@ class TestTwoPassCollection:
             source_title="Flashscore Stats",
         )
         # No pass 2 triggered since deferred_source_discovery spec has no source_targets
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
         with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
              patch.object(agent, "_get_client", return_value=MagicMock()), \
              patch.object(agent, "_call_gemini", return_value=resp):
@@ -673,7 +673,7 @@ class TestTwoPassCollection:
         """When no source_targets are specified, only pass 1 runs."""
         resp = _mock_gemini_response("Yes", "Found it.")
 
-        agent = CollectorGeminiGrounded()
+        agent = CollectorOpenSearch()
         call_count = 0
 
         def mock_call(client, prompt):
@@ -709,7 +709,7 @@ class TestMergeGrounding:
             ],
             "search_queries": ["query 2", "query 1"],
         }
-        merged = CollectorGeminiGrounded._merge_grounding(first, second)
+        merged = CollectorOpenSearch._merge_grounding(first, second)
         assert len(merged["sources"]) == 3
         uris = [s["uri"] for s in merged["sources"]]
         assert "https://a.com" in uris
@@ -732,7 +732,7 @@ class TestBuildEvidenceSources:
             ],
         }
         required = [{"domain": "fotmob.com"}]
-        sources = CollectorGeminiGrounded._build_evidence_sources(grounding, required)
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, required)
         assert sources[0]["credibility_tier"] == 1
         assert sources[0]["is_required_data_source"] is True
         assert sources[1]["credibility_tier"] == 2

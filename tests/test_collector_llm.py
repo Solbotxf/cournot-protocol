@@ -1,5 +1,5 @@
 """
-Tests for CollectorLLM agent.
+Tests for CollectorBrowse agent.
 
 Verifies LLM-based evidence collection including JSON parsing,
 retry logic, provenance, and registry integration.
@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agents.collector.agent import CollectorLLM, get_collector
+from agents.collector.agent import CollectorBrowse, get_collector
 from agents.context import AgentContext
 from agents.base import AgentCapability, AgentStep
 from agents.registry import get_registry
@@ -110,27 +110,27 @@ def _good_llm_json(**overrides) -> str:
 # ---------------------------------------------------------------------------
 
 
-class TestCollectorLLMRequiresLLM:
-    """CollectorLLM must fail gracefully when ctx.llm is None."""
+class TestCollectorBrowseRequiresLLM:
+    """CollectorBrowse must fail gracefully when ctx.llm is None."""
 
     def test_requires_llm(self):
         ctx = AgentContext.create_mock()
         # Remove LLM from context
         ctx.llm = None
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, _make_prompt_spec(), _make_tool_plan())
         assert not result.success
         assert "LLM client not available" in result.error
 
 
-class TestCollectorLLMSuccess:
+class TestCollectorBrowseSuccess:
     """Successful single-requirement collection."""
 
     def test_success_single_requirement(self):
         response_json = _good_llm_json()
         ctx = AgentContext.create_mock(llm_responses=[response_json])
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, _make_prompt_spec(), _make_tool_plan())
 
         assert result.success
@@ -145,7 +145,7 @@ class TestCollectorLLMSuccess:
         assert execution_log.total_calls == 1
 
 
-class TestCollectorLLMJsonRepair:
+class TestCollectorBrowseJsonRepair:
     """JSON repair loop: first response invalid, second valid."""
 
     def test_json_repair_loop(self):
@@ -154,7 +154,7 @@ class TestCollectorLLMJsonRepair:
 
         ctx = AgentContext.create_mock(llm_responses=[bad_response, good_response])
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, _make_prompt_spec(), _make_tool_plan())
 
         assert result.success
@@ -163,7 +163,7 @@ class TestCollectorLLMJsonRepair:
         assert bundle.items[0].success
 
 
-class TestCollectorLLMRetriesExhausted:
+class TestCollectorBrowseRetriesExhausted:
     """All retries exhausted → error evidence."""
 
     def test_all_retries_exhausted(self):
@@ -173,7 +173,7 @@ class TestCollectorLLMRetriesExhausted:
             llm_responses=[bad_response, bad_response, bad_response]
         )
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, _make_prompt_spec(), _make_tool_plan())
 
         # Should still return a result (with error evidence)
@@ -185,7 +185,7 @@ class TestCollectorLLMRetriesExhausted:
         assert "JSON parse failed" in item.error
 
 
-class TestCollectorLLMMultipleRequirements:
+class TestCollectorBrowseMultipleRequirements:
     """Iterates tool_plan requirements correctly."""
 
     def test_multiple_requirements(self):
@@ -216,7 +216,7 @@ class TestCollectorLLMMultipleRequirements:
         prompt_spec = _make_prompt_spec(requirements=requirements)
         tool_plan = _make_tool_plan(requirements=["req_001", "req_002"])
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, prompt_spec, tool_plan)
 
         assert result.success
@@ -227,7 +227,7 @@ class TestCollectorLLMMultipleRequirements:
         assert "req_002" in bundle.requirements_fulfilled
 
 
-class TestCollectorLLMSingleBestStrategy:
+class TestCollectorBrowseSingleBestStrategy:
     """Stops after first source for single_best strategy."""
 
     def test_single_best_strategy(self):
@@ -245,7 +245,7 @@ class TestCollectorLLMSingleBestStrategy:
 
         ctx = AgentContext.create_mock(llm_responses=[_good_llm_json()])
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(
             ctx, _make_prompt_spec(requirements=requirements), _make_tool_plan()
         )
@@ -257,13 +257,13 @@ class TestCollectorLLMSingleBestStrategy:
         assert execution_log.total_calls == 1
 
 
-class TestCollectorLLMProvenanceTier:
+class TestCollectorBrowseProvenanceTier:
     """Evidence has provenance tier=2 (LLM-interpreted)."""
 
     def test_provenance_tier(self):
         ctx = AgentContext.create_mock(llm_responses=[_good_llm_json()])
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, _make_prompt_spec(), _make_tool_plan())
 
         bundle, _ = result.output
@@ -271,7 +271,7 @@ class TestCollectorLLMProvenanceTier:
         assert item.provenance.tier == 2
 
 
-class TestCollectorLLMRawContentTruncated:
+class TestCollectorBrowseRawContentTruncated:
     """raw_content is truncated to <= 100 chars."""
 
     def test_raw_content_truncated(self):
@@ -280,7 +280,7 @@ class TestCollectorLLMRawContentTruncated:
             llm_responses=[_good_llm_json(content_summary=long_summary)]
         )
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, _make_prompt_spec(), _make_tool_plan())
 
         bundle, _ = result.output
@@ -288,22 +288,22 @@ class TestCollectorLLMRawContentTruncated:
         assert len(item.raw_content) <= 100
 
 
-class TestCollectorLLMRegistryPriority:
-    """CollectorLLM priority=150 > CollectorHTTP priority=100."""
+class TestCollectorBrowseRegistryPriority:
+    """CollectorBrowse priority=180 > CollectorHTTP priority=100."""
 
     def test_registry_priority(self):
         registry = get_registry()
         entries = registry._entries.get(AgentStep.COLLECTOR, [])
 
-        llm_entry = next(e for e in entries if e.name == "CollectorLLM")
+        llm_entry = next(e for e in entries if e.name == "CollectorBrowse")
         http_entry = next(e for e in entries if e.name == "CollectorHTTP")
 
-        assert llm_entry.priority == 150
+        assert llm_entry.priority == 180
         assert http_entry.priority == 100
         assert llm_entry.priority > http_entry.priority
 
 
-class TestCollectorLLMFallbackSelection:
+class TestCollectorBrowseFallbackSelection:
     """Pipeline selects CollectorHTTP when no LLM available."""
 
     def test_fallback_selection(self):
@@ -312,22 +312,22 @@ class TestCollectorLLMFallbackSelection:
 
         # get_collector should fall back to mock (no http either)
         collector = get_collector(ctx)
-        assert not isinstance(collector, CollectorLLM)
+        assert not isinstance(collector, CollectorBrowse)
 
     def test_selects_llm_when_available(self):
         ctx = AgentContext.create_mock(llm_responses=["{}"])
 
         collector = get_collector(ctx)
-        assert isinstance(collector, CollectorLLM)
+        assert isinstance(collector, CollectorBrowse)
 
     def test_skips_llm_when_prefer_llm_false(self):
         ctx = AgentContext.create_mock(llm_responses=["{}"])
 
         collector = get_collector(ctx, prefer_llm=False)
-        assert not isinstance(collector, CollectorLLM)
+        assert not isinstance(collector, CollectorBrowse)
 
 
-class TestCollectorLLMDeferredDiscovery:
+class TestCollectorBrowseDeferredDiscovery:
     """Tests for deferred source discovery."""
 
     def test_deferred_discovery_generates_tool_call(self):
@@ -351,7 +351,7 @@ class TestCollectorLLMDeferredDiscovery:
         prompt_spec = _make_prompt_spec(requirements=requirements)
         tool_plan = _make_tool_plan(requirements=["req_001"])
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, prompt_spec, tool_plan)
 
         assert result.success
@@ -382,7 +382,7 @@ class TestCollectorLLMDeferredDiscovery:
         prompt_spec = _make_prompt_spec(requirements=requirements)
         tool_plan = _make_tool_plan(requirements=["req_001"])
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, prompt_spec, tool_plan)
 
         bundle, _ = result.output
@@ -420,7 +420,7 @@ class TestCollectorLLMDeferredDiscovery:
         prompt_spec = _make_prompt_spec(requirements=requirements)
         tool_plan = _make_tool_plan(requirements=["req_001", "req_002"])
 
-        collector = CollectorLLM()
+        collector = CollectorBrowse()
         result = collector.run(ctx, prompt_spec, tool_plan)
 
         bundle, execution_log = result.output

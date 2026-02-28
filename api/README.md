@@ -174,7 +174,7 @@ Discover available agents and configured LLM providers. Only providers with API 
     {
       "step": "collector",
       "agents": [
-        { "name": "CollectorLLM", "description": "...", "version": "v1", "capabilities": ["llm", "network"], "priority": 180, "is_fallback": false },
+        { "name": "CollectorBrowse", "description": "...", "version": "v1", "capabilities": ["llm", "network"], "priority": 180, "is_fallback": false },
         { "name": "CollectorCRP", "description": "...", "version": "v1", "capabilities": ["llm", "network"], "priority": 195, "is_fallback": false },
         { "name": "CollectorHyDE", "description": "...", "version": "v1", "capabilities": ["llm", "network"], "priority": 190, "is_fallback": false }
       ]
@@ -212,7 +212,7 @@ POST /step/collect
 
 Run evidence collection using one or more collectors. Pass the `prompt_spec` and `tool_plan` from the prompt step.
 
-Available collectors: `CollectorLLM`, `CollectorHyDE`, `CollectorHTTP`, `CollectorMock`, `CollectorAgenticRAG`, `CollectorGraphRAG`, `CollectorPAN`, `CollectorGeminiGrounded`, `CollectorCRP`.
+Available collectors: `CollectorBrowse`, `CollectorHyDE`, `CollectorHTTP`, `CollectorMock`, `CollectorAgenticRAG`, `CollectorGraphRAG`, `CollectorPAN`, `CollectorOpenSearch`, `CollectorCRP`.
 
 **Request Body:**
 ```json
@@ -290,7 +290,7 @@ Run the full resolution pipeline (collect → audit → judge → PoR bundle) in
 {
   "prompt_spec": { "..." : "..." },
   "tool_plan": { "..." : "..." },
-  "collectors": ["CollectorLLM"],
+  "collectors": ["CollectorBrowse"],
   "execution_mode": "development"
 }
 ```
@@ -327,7 +327,7 @@ Example `cournot.json` that uses Grok for collectors and OpenAI for everything e
   },
   "agents": {
     "collector": {
-      "name": "CollectorLLM",
+      "name": "CollectorBrowse",
       "llm_override": {
         "provider": "grok",
         "model": "grok-4-fast",

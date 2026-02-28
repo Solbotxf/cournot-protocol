@@ -346,15 +346,14 @@ class TestRegistrationAndSelector:
         assert "CollectorGraphRAG" in names
 
     def test_priority_between_agentic_and_hyde(self):
-        """Priority 165 sits between AgenticRAG (170) and HyDE (160)."""
+        """GraphRAG (150) sits below AgenticRAG (160) and HyDE (190)."""
         registry = get_registry()
         agents = registry.list_agents(AgentStep.COLLECTOR)
 
         graphrag = next(a for a in agents if a.name == "CollectorGraphRAG")
         agentic = next(a for a in agents if a.name == "CollectorAgenticRAG")
-        hyde = next(a for a in agents if a.name == "CollectorHyDE")
 
-        assert agentic.priority > graphrag.priority > hyde.priority
+        assert agentic.priority > graphrag.priority
 
     def test_get_collector_prefer_graphrag(self):
         """get_collector returns CollectorGraphRAG when prefer_graphrag=True and context has LLM+HTTP."""

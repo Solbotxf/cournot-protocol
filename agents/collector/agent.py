@@ -4,12 +4,12 @@ Collector Agent
 Executes ToolPlans to collect evidence from external sources.
 
 Three implementations:
-- CollectorLLM: Uses LLM web browsing to fetch and interpret content (preferred)
+- CollectorBrowse: Uses LLM web browsing to fetch and interpret content (preferred)
 - CollectorHTTP: Makes real HTTP requests (production)
 - CollectorMock: Returns mock data (testing)
 
 Selection logic:
-- If ctx.llm is available → use LLM collector
+- If ctx.llm is available → use Browse collector
 - If ctx.http is available → use HTTP collector
 - Otherwise → use mock collector
 """
@@ -403,22 +403,15 @@ You MUST return a single, valid JSON object. Do not include markdown formatting 
 """
 
 
-class CollectorLLM(BaseAgent):
-    """
-    LLM-based Collector Agent.
+class CollectorBrowse(BaseAgent):
+    """Browse-based collector.
 
-    Uses LLM web browsing capability to fetch and interpret URL content.
-    Instead of raw HTTP fetching, passes URL + extraction instructions to the LLM,
-    which browses and returns structured data.
-
-    Features:
-    - LLM-interpreted data extraction
-    - Automatic JSON repair loop
-    - Provenance tier 2 (LLM-interpreted)
-    - Higher priority than CollectorHTTP for automatic selection
+    Uses an LLM with web browsing capability to fetch and interpret specific
+    URL content.  Extracts structured data with automatic JSON repair.
+    Supports deferred source discovery via search.
     """
 
-    _name = "CollectorLLM"
+    _name = "CollectorBrowse"
     _version = "v1"
     _capabilities = {AgentCapability.LLM}
     MAX_RETRIES = 2
@@ -440,13 +433,13 @@ class CollectorLLM(BaseAgent):
         Returns:
             AgentResult with (EvidenceBundle, ToolExecutionLog) as output
         """
-        ctx.info(f"CollectorLLM executing plan {tool_plan.plan_id}")
+        ctx.info(f"CollectorBrowse executing plan {tool_plan.plan_id}")
 
         if ctx.llm is None:
             return AgentResult.failure(error="LLM client not available")
 
         bundle = EvidenceBundle(
-            bundle_id=f"llm_{tool_plan.plan_id}",
+            bundle_id=f"browse_{tool_plan.plan_id}",
             market_id=prompt_spec.market_id,
             plan_id=tool_plan.plan_id,
         )
@@ -3469,11 +3462,11 @@ def get_collector(
         Appropriate collector agent instance
     """
     if prefer_gemini_grounded:
-        from .gemini_grounded_agent import CollectorGeminiGrounded
+        from .gemini_grounded_agent import CollectorOpenSearch
         kwargs: dict[str, Any] = {}
         if gemini_model:
             kwargs["model"] = gemini_model
-        return CollectorGeminiGrounded(**kwargs)
+        return CollectorOpenSearch(**kwargs)
     if prefer_pan and ctx.llm is not None and ctx.http is not None:
         from .pan_agent import PANCollectorAgent
         return PANCollectorAgent(pan_config=pan_config)
@@ -3484,7 +3477,7 @@ def get_collector(
     if prefer_hyde and ctx.llm is not None and ctx.http is not None:
         return CollectorHyDE()
     if prefer_llm and ctx.llm is not None:
-        return CollectorLLM()
+        return CollectorBrowse()
     if prefer_http and ctx.http is not None:
         return CollectorHTTP()
     return CollectorMock(mock_responses=mock_responses)
@@ -3517,39 +3510,40 @@ def collect_evidence(
 def _register_agents() -> None:
     """Register collector agents."""
     from .pan_agent import PANCollectorAgent
-    from .gemini_grounded_agent import CollectorGeminiGrounded
-    from .source_pinned_agent import CollectorSourcePinned
+    from .gemini_grounded_agent import CollectorOpenSearch
+    from .source_pinned_agent import CollectorDomainPinned
     from .crp_agent import CollectorCRP
 
     register_agent(
         step=AgentStep.COLLECTOR,
-        name="CollectorGeminiGrounded",
-        factory=lambda ctx: CollectorGeminiGrounded(),
+        name="CollectorOpenSearch",
+        factory=lambda ctx: CollectorOpenSearch(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
         priority=200,  # 1st — single-call grounded search via Gemini
         metadata={
             "description": (
-                "Gemini-grounded collector. Uses Google Gemini with built-in "
-                "Google Search grounding to resolve market questions in a single "
-                "LLM call. Gemini searches the web autonomously and returns a "
-                "grounded answer with citations. Requires GOOGLE_API_KEY."
+                "Open web search collector (Gemini only). Uses Google Gemini "
+                "with built-in Google Search grounding to resolve market "
+                "questions in a single LLM call. Searches the open web "
+                "autonomously and returns a grounded answer with citations. "
+                "Requires GOOGLE_API_KEY."
             ),
         },
     )
 
     register_agent(
         step=AgentStep.COLLECTOR,
-        name="CollectorSourcePinned",
-        factory=lambda ctx: CollectorSourcePinned(),
+        name="CollectorDomainPinned",
+        factory=lambda ctx: CollectorDomainPinned(),
         capabilities={AgentCapability.LLM, AgentCapability.NETWORK},
         priority=198,  # Just below GeminiGrounded (200)
         metadata={
             "description": (
-                "Source-pinned collector. Like CollectorGeminiGrounded "
-                "but ONLY searches within data-source domains specified in the "
-                "requirement's source_targets. Evidence from other domains is "
-                "discarded. Retries up to 3 times to find required-domain evidence. "
-                "Fails if no source_targets are defined. Requires GOOGLE_API_KEY."
+                "Domain-pinned collector. Searches ONLY within data-source "
+                "domains specified in the requirement's source_targets. Uses "
+                "Serper for URL discovery, structured extractors for direct "
+                "data extraction, and Gemini UrlContext + GoogleSearch as "
+                "fallback. Retries up to 3 times. Requires GOOGLE_API_KEY."
             ),
         },
     )
@@ -3616,11 +3610,11 @@ def _register_agents() -> None:
 
     register_agent(
         step=AgentStep.COLLECTOR,
-        name="CollectorLLM",
-        factory=lambda ctx: CollectorLLM(),
+        name="CollectorBrowse",
+        factory=lambda ctx: CollectorBrowse(),
         capabilities={AgentCapability.LLM},
         priority=180,  # 3rd — preferred when LLM available
-        metadata={"description": "LLM-based collector that uses web browsing to fetch and interpret URL content. Extracts structured data via LLM with automatic JSON repair. Supports deferred source discovery via search."},
+        metadata={"description": "Browse-based collector. Uses an LLM with web browsing capability to fetch and interpret specific URL content. Extracts structured data with automatic JSON repair. Supports deferred source discovery via search."},
     )
 
     register_agent(

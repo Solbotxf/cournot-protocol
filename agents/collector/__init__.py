@@ -17,7 +17,7 @@ Usage:
 
 from .agent import (
     CollectorHTTP,
-    CollectorLLM,
+    CollectorBrowse,
     CollectorGraphRAG,
     CollectorMock,
     collect_evidence,
@@ -26,8 +26,8 @@ from .agent import (
 
 from .pan_agent import PANCollectorAgent, PANCollectorConfig
 from .pan_runtime import SearchAlgo, SearchConfig
-from .gemini_grounded_agent import CollectorGeminiGrounded
-from .source_pinned_agent import CollectorSourcePinned
+from .gemini_grounded_agent import CollectorOpenSearch
+from .source_pinned_agent import CollectorDomainPinned
 from .crp_agent import CollectorCRP
 
 from .engine import CollectionEngine
@@ -45,12 +45,12 @@ from .adapters import (
 __all__ = [
     # Agents
     "CollectorHTTP",
-    "CollectorLLM",
+    "CollectorBrowse",
     "CollectorGraphRAG",
     "CollectorMock",
     "PANCollectorAgent",
-    "CollectorGeminiGrounded",
-    "CollectorSourcePinned",
+    "CollectorOpenSearch",
+    "CollectorDomainPinned",
     "CollectorCRP",
     # PAN config / runtime
     "PANCollectorConfig",

@@ -19,7 +19,7 @@ class TestFromDictParsesLLMOverride:
         data = {
             "agents": {
                 "collector": {
-                    "name": "CollectorLLM",
+                    "name": "CollectorBrowse",
                     "llm_override": {
                         "provider": "anthropic",
                         "model": "claude-sonnet-4-20250514",
@@ -48,7 +48,7 @@ class TestFromDictParsesLLMOverride:
         data = {
             "agents": {
                 "collector": {
-                    "name": "CollectorLLM",
+                    "name": "CollectorBrowse",
                     "llm_override": {
                         "provider": "openai",
                         "model": "gpt-4o-mini",
@@ -158,7 +158,7 @@ class TestResolveCtx:
         cfg = RuntimeConfig.from_dict({
             "agents": {
                 "collector": {
-                    "name": "CollectorLLM",
+                    "name": "CollectorBrowse",
                     "llm_override": {
                         "provider": "anthropic",
                         "model": "claude-sonnet-4-20250514",

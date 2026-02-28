@@ -111,7 +111,7 @@ r = json.load(open('prompt_out.json'))
 print(json.dumps({
     'prompt_spec': r['prompt_spec'],
     'tool_plan': r['tool_plan'],
-    'collectors': ['CollectorSourcePinned'],
+    'collectors': ['CollectorDomainPinned'],
     'include_raw_content': False
 }))
 ")" -o collect_out.json

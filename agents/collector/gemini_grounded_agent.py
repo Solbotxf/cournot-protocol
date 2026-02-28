@@ -1,9 +1,9 @@
 """
-Gemini-Grounded Collector Agent.
+Open Web Search Collector Agent (CollectorOpenSearch).
 
 Uses Google Gemini with built-in Google Search grounding to resolve
 prediction market questions in a single LLM call.  Gemini searches
-the web autonomously and returns a grounded answer with citations.
+the open web autonomously and returns a grounded answer with citations.
 
 This is fundamentally different from other collectors:
 - No Serper API needed — Gemini does the searching itself.
@@ -210,17 +210,16 @@ def _build_targeted_source_prompt(
 # Gemini-Grounded Collector
 # ---------------------------------------------------------------------------
 
-class CollectorGeminiGrounded(BaseAgent):
-    """Collector that uses Gemini with Google Search grounding.
+class CollectorOpenSearch(BaseAgent):
+    """Open web search collector (Gemini only).
 
-    A single Gemini call with ``GoogleSearch`` tool enabled handles both
-    web retrieval and evidence synthesis.  Grounding metadata (URLs,
-    titles, support segments) is extracted into the EvidenceItem.
-
-    Capabilities: LLM + NETWORK (Gemini performs the network search).
+    Uses Google Gemini with built-in Google Search grounding to resolve
+    market questions in a single LLM call.  Searches the open web
+    autonomously and returns a grounded answer with citations.
+    Requires GOOGLE_API_KEY.
     """
 
-    _name = "CollectorGeminiGrounded"
+    _name = "CollectorOpenSearch"
     _version = "v1"
     _capabilities = {AgentCapability.LLM, AgentCapability.NETWORK}
 
@@ -243,7 +242,7 @@ class CollectorGeminiGrounded(BaseAgent):
         prompt_spec: PromptSpec,
         tool_plan: ToolPlan,
     ) -> AgentResult:
-        ctx.info(f"CollectorGeminiGrounded executing plan {tool_plan.plan_id} "
+        ctx.info(f"CollectorOpenSearch executing plan {tool_plan.plan_id} "
                  f"[model={self._model}]")
 
         api_key = self._resolve_api_key(ctx)
@@ -256,7 +255,7 @@ class CollectorGeminiGrounded(BaseAgent):
         client = self._get_client(api_key)
 
         bundle = EvidenceBundle(
-            bundle_id=f"gemini_grounded_{tool_plan.plan_id}",
+            bundle_id=f"open_search_{tool_plan.plan_id}",
             market_id=prompt_spec.market_id,
             plan_id=tool_plan.plan_id,
         )
@@ -302,7 +301,7 @@ class CollectorGeminiGrounded(BaseAgent):
             success=bundle.has_evidence,
             error=None if bundle.has_evidence else "No evidence collected",
             metadata={
-                "collector": "gemini_grounded",
+                "collector": "open_search",
                 "bundle_id": bundle.bundle_id,
                 "model": self._model,
                 "total_sources_attempted": bundle.total_sources_attempted,
@@ -323,7 +322,7 @@ class CollectorGeminiGrounded(BaseAgent):
     ) -> tuple[EvidenceItem, ToolCallRecord]:
         req_id = requirement.requirement_id
         evidence_id = hashlib.sha256(
-            f"gemini_grounded:{req_id}".encode()
+            f"open_search:{req_id}".encode()
         ).hexdigest()[:16]
 
         required_domains = _extract_required_domains(requirement)
@@ -331,7 +330,7 @@ class CollectorGeminiGrounded(BaseAgent):
         user_prompt = _build_user_prompt(prompt_spec, requirement)
 
         record = ToolCallRecord(
-            tool="gemini_grounded:search_and_resolve",
+            tool="open_search:search_and_resolve",
             input={"requirement_id": req_id, "model": self._model},
             started_at=ctx.now().isoformat(),
         )

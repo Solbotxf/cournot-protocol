@@ -1,9 +1,10 @@
 """
-Gemini-Grounded Strict Collector Agent.
+Domain-Pinned Collector Agent (CollectorDomainPinned).
 
-A strict variant of CollectorGeminiGrounded that ONLY searches within
-the data-source domains specified in the requirement's source_targets.
-Evidence from non-required domains is discarded.
+Searches ONLY within data-source domains specified in the requirement's
+source_targets.  Uses Serper for URL discovery, structured extractors
+for direct data extraction, and Gemini UrlContext + GoogleSearch as
+fallback.  Retries up to 3 times.  Requires GOOGLE_API_KEY.
 
 Uses a two-phase approach:
 1. **Serper discovery** — find actual page URLs on the required domain
@@ -14,7 +15,7 @@ Uses a two-phase approach:
    content, alongside ``GoogleSearch`` for supplementary evidence.
 
 If no source_targets are defined on the requirement, this collector
-will fail — use CollectorGeminiGrounded instead for open-ended search.
+will fail — use CollectorOpenSearch instead for open-ended search.
 
 Requires: google-genai package (pip install google-genai)
 """
@@ -45,7 +46,7 @@ from .gemini_grounded_agent import (
     GEMINI_GROUNDED_SYSTEM_PROMPT,
     _extract_required_domains,
     _sources_cover_domains,
-    CollectorGeminiGrounded,
+    CollectorOpenSearch,
 )
 
 from .extractors import find_extractor
@@ -223,27 +224,17 @@ def _build_strict_prompt(
 # Strict Gemini-Grounded Collector
 # ---------------------------------------------------------------------------
 
-class CollectorSourcePinned(CollectorGeminiGrounded):
-    """Strict variant of the Gemini-grounded collector.
+class CollectorDomainPinned(CollectorOpenSearch):
+    """Domain-pinned collector.
 
-    Only searches within data-source domains specified in the
-    requirement's ``source_targets``.  Evidence from other domains is
-    discarded.  If no source_targets are defined, the collector fails.
-
-    **Two-phase approach:**
-
-    1. **Serper discovery** — uses the Serper API to find actual page
-       URLs on the required domains.  This reliably surfaces JS-heavy
-       sites that Gemini's grounding alone misses.
-    2. **Gemini UrlContext + GoogleSearch** — passes the discovered URLs
-       to Gemini via the ``UrlContext`` tool (full page ingestion)
-       alongside ``GoogleSearch`` for supplementary evidence.
-
-    The collector makes up to ``max_attempts`` Gemini calls per
-    requirement, retrying until evidence from a required domain is found.
+    Searches ONLY within data-source domains specified in the
+    requirement's ``source_targets``.  Uses Serper for URL discovery,
+    structured extractors for direct data extraction, and Gemini
+    UrlContext + GoogleSearch as fallback.  Retries up to 3 times.
+    Requires GOOGLE_API_KEY.
     """
 
-    _name = "CollectorSourcePinned"
+    _name = "CollectorDomainPinned"
     _version = "v2"
     _capabilities = {AgentCapability.LLM, AgentCapability.NETWORK}
 
@@ -631,8 +622,8 @@ class CollectorSourcePinned(CollectorGeminiGrounded):
                 ),
                 success=False,
                 error=(
-                    "CollectorSourcePinned requires source_targets "
-                    "with at least one domain. Use CollectorGeminiGrounded "
+                    "CollectorDomainPinned requires source_targets "
+                    "with at least one domain. Use CollectorOpenSearch "
                     "for open-ended search."
                 ),
             ), record
