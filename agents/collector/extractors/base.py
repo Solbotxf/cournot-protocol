@@ -42,4 +42,4 @@ class SiteExtractor(ABC):
     @property
     @abstractmethod
     def source_id(self) -> str:
-        """Short identifier, e.g. 'fotmob', 'fbref'."""
+        """Short identifier, e.g. 'fotmob'."""

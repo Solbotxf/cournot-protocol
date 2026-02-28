@@ -1,19 +1,18 @@
 # Handoff: Generalized Site Extractor Registry
 
 ## Goal
-Replace the hardcoded FotMob-only Phase 1.5 with a pluggable extractor registry, and add FBRef as the second extractor using the `soccerdata` library.
+Pluggable extractor registry for structured HTTP extraction (Phase 1.5), with domain-specific prompt hints for Cloudflare-guarded sites in Phase 2.
 
 ## Current State
 - **Strict collector** with three-phase approach:
   1. **Phase 1: Serper pre-search** — uses LLM-generated discovery query (`_generate_discovery_query`) to find top 3 URLs on the required domain via `google.serper.dev/search`.
-  2. **Phase 1.5: Extractor registry dispatch + LLM resolution** — loops through discovered URLs, finds a matching `SiteExtractor` via `find_extractor()`, fetches structured data, builds a text summary, then asks Gemini to resolve. Currently supports **FotMob** and **FBRef**.
+  2. **Phase 1.5: Extractor registry dispatch + LLM resolution** — loops through discovered URLs, finds a matching `SiteExtractor` via `find_extractor()`, fetches structured data, builds a text summary, then asks Gemini to resolve. Currently supports **FotMob**. (FBRef was removed — see below.)
   3. **Phase 2: Gemini UrlContext + GoogleSearch** — fallback if Phase 1.5 is not applicable or fails. Passes discovered URLs to Gemini via `UrlContext` tool for full page ingestion.
-- **93 tests pass** across 5 test files:
-  - `test_fotmob.py` (31 tests) — FotMob data extraction
-  - `test_collector_source_pinned.py` (40 tests) — strict agent behavior
-  - `test_extractor_registry.py` (8 tests) — registry + FotMobExtractor
-  - `test_fbref_extractor.py` (12 tests) — FBRefExtractor
-  - `test_fotmob_live.py` (2 tests) — live FotMob fetch
+- **Tests pass** across 4 test files:
+  - `test_fotmob.py` — FotMob data extraction
+  - `test_collector_source_pinned.py` — strict agent behavior
+  - `test_extractor_registry.py` — registry + FotMobExtractor
+  - `test_fotmob_live.py` — live FotMob fetch
 - **End-to-end API pipeline verified** for both stat-based and event-based markets.
 - **Branch:** `feat/extractor-registry` (6 commits)
 
@@ -31,9 +30,7 @@ Introduced a `SiteExtractor` ABC and a registry pattern:
 
 3. **`agents/collector/extractors/fotmob_ext.py`** — `FotMobExtractor` wrapping existing `fotmob.py` (`fetch_match_stats` + `summarize_for_llm`). Returns `(summary_text, metadata_dict)`.
 
-4. **`agents/collector/extractors/fbref_ext.py`** — `FBRefExtractor` using `soccerdata` library. Parses game ID from URL, infers league/season, fetches player stats + shot events via `soccerdata.FBref`, builds text summary.
-
-5. **`agents/collector/source_pinned_agent.py`** — Replaced `_try_fotmob_direct_extraction` with `_try_direct_extraction` that uses `find_extractor()` dispatch. Removed direct fotmob imports.
+4. **`agents/collector/source_pinned_agent.py`** — Replaced `_try_fotmob_direct_extraction` with `_try_direct_extraction` that uses `find_extractor()` dispatch. Removed direct fotmob imports.
 
 ### Architecture
 
@@ -41,9 +38,10 @@ Introduced a `SiteExtractor` ABC and a registry pattern:
 agents/collector/extractors/
 ├── __init__.py          # Registry: find_extractor(url) -> SiteExtractor | None
 ├── base.py              # SiteExtractor ABC, ExtractionError
-├── fotmob_ext.py        # FotMobExtractor (wraps fotmob.py)
-└── fbref_ext.py         # FBRefExtractor (soccerdata library)
+└── fotmob_ext.py        # FotMobExtractor (wraps fotmob.py)
 ```
+
+**Note on FBRef:** `FBRefExtractor` was removed because it was a thin Gemini UrlContext wrapper — functionally identical to Phase 2. Cloudflare-guarded sites like FBRef are now handled by Phase 2 with domain-specific prompt hints (`_DOMAIN_PROMPT_HINTS` in `source_pinned_agent.py`). The extractor registry is reserved for structured HTTP extraction (like FotMob's `__NEXT_DATA__` JSON).
 
 The registry is a simple list of `SiteExtractor` instances. `find_extractor(url)` iterates and returns the first extractor whose `can_handle(url)` returns `True`.
 
@@ -75,22 +73,10 @@ The registry is a simple list of `SiteExtractor` instances. `find_extractor(url)
 3. Add tests in `tests/test_mysite_extractor.py`.
 
 ### Files Changed
-- **New:** `agents/collector/extractors/` — package with `base.py`, `__init__.py`, `fotmob_ext.py`, `fbref_ext.py`
+- **New:** `agents/collector/extractors/` — package with `base.py`, `__init__.py`, `fotmob_ext.py`
 - **Modified:** `agents/collector/source_pinned_agent.py` — replaced `_try_fotmob_direct_extraction` → `_try_direct_extraction`; imports changed from `fotmob` to `extractors`
 - **Modified:** `tests/test_collector_source_pinned.py` — updated `TestFotMobDirectExtraction` to mock `find_extractor`; added `TestGenericDirectExtraction` (4 tests)
-- **New:** `tests/test_extractor_registry.py` — 8 tests for registry + FotMobExtractor
-- **New:** `tests/test_fbref_extractor.py` — 12 tests for FBRefExtractor
-
-## FBRef Extractor Details
-
-The `FBRefExtractor` uses the `soccerdata` library (v1.8.8) to fetch data from fbref.com:
-
-- **URL parsing:** `_parse_game_id(url)` extracts hex game ID from `fbref.com/en/matches/{id}/...`
-- **League inference:** `_infer_league_season(url)` maps URL slugs (`Premier-League` → `ENG-Premier League`) and infers season from date in URL
-- **Data fetching:** `_create_fbref_client(league, season)` creates `soccerdata.FBref` instance; fetches `read_player_match_stats(stat_type="summary")` and `read_shot_events()`
-- **Summary:** `_summarize_player_stats(df)` and `_summarize_shot_events(df)` build text sections
-
-Supported leagues: Premier League, La Liga, Serie A, Bundesliga, Ligue 1.
+- **New:** `tests/test_extractor_registry.py` — tests for registry + FotMobExtractor
 
 ## Key Findings (carried forward)
 
@@ -197,11 +183,8 @@ print(json.dumps({
 If any step fails, Phase 1.5 returns `None` and the collector falls through to Phase 2 Gemini.
 
 ## Remaining Issues
-1. **FBRef not yet tested end-to-end** — the FBRefExtractor is implemented and unit-tested with mocks, but has not been tested against the live API pipeline. Need to verify `soccerdata` fetches work in production.
-2. **Two-leg matches** — FotMob only serves second-leg data via SSR `__NEXT_DATA__`. First-leg markets cannot use Phase 1.5.
-3. **Rate limiting** — `soccerdata` scrapes fbref.com directly; may hit rate limits under heavy use.
+1. **Two-leg matches** — FotMob only serves second-leg data via SSR `__NEXT_DATA__`. First-leg markets cannot use Phase 1.5.
 
 ## Next Steps
-- **Test FBRef end-to-end** — run a market with `fbref.com` as the data source via the API pipeline.
 - **Add more extractors** — the registry pattern makes it straightforward to add extractors for other domains (e.g. Transfermarkt, ESPN, CoinGecko for non-football markets).
-- **Prompt agent integration** — teach the prompt agent to suggest `fbref.com` as a `source_target` for markets that reference FBRef data.
+- **Add more domain hints** — add `_DOMAIN_PROMPT_HINTS` entries for other Cloudflare-guarded or JS-heavy sites to improve Phase 2 extraction quality.

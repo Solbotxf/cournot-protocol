@@ -10,10 +10,10 @@ class TestFindExtractor:
         assert ext is not None
         assert ext.source_id == "fotmob"
 
-    def test_finds_fbref_extractor(self):
+    def test_returns_none_for_fbref_url(self):
+        """FBRef URLs should fall through to Phase 2 (no extractor registered)."""
         ext = find_extractor("https://fbref.com/en/matches/7e6892e4/Brentford-Arsenal-January-1-2025-Premier-League")
-        assert ext is not None
-        assert ext.source_id == "fbref"
+        assert ext is None
 
     def test_returns_none_for_unknown_url(self):
         ext = find_extractor("https://flashscore.com/match/123")

@@ -7,19 +7,16 @@ from __future__ import annotations
 
 from .base import ExtractionError, SiteExtractor
 from .fotmob_ext import FotMobExtractor
-from .fbref_ext import FBRefExtractor
 
 __all__ = [
     "ExtractionError",
     "SiteExtractor",
     "FotMobExtractor",
-    "FBRefExtractor",
     "find_extractor",
 ]
 
 _REGISTRY: list[SiteExtractor] = [
     FotMobExtractor(),
-    FBRefExtractor(),
 ]
 
 

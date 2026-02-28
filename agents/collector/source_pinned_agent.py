@@ -99,6 +99,31 @@ The JSON MUST have exactly these two keys: "outcome" and "reason".
   exact data value found and its source.
 """
 
+# ---------------------------------------------------------------------------
+# Domain-specific prompt hints for Phase 2 (Gemini UrlContext)
+# ---------------------------------------------------------------------------
+# Sites behind Cloudflare JS challenges (e.g. FBRef) cannot use structured
+# HTTP extraction — they fall through to Phase 2.  These hints tell Gemini
+# what to look for when reading the page via UrlContext.
+
+_DOMAIN_PROMPT_HINTS: dict[str, str] = {
+    "fbref.com": (
+        "DOMAIN HINT (fbref.com):\n"
+        "You are reading a FBRef.com match report page. Extract ALL match data "
+        "into a structured text summary. Include:\n"
+        "1. Score line: \"HomeTeam X - Y AwayTeam\"\n"
+        "2. Player stats table: For each team, list every player with their "
+        "key stats (minutes, goals, assists, shots, shots on target, passes, "
+        "tackles, interceptions, fouls, cards).\n"
+        "3. Shot events: If a shot/goal log is visible, list each shot with "
+        "minute, player, team, outcome (Goal/Saved/Blocked/Off Target), and "
+        "body part.\n"
+        "4. Team totals: Possession, total shots, shots on target, corners, "
+        "fouls, offsides, cards — for both teams.\n"
+        "Look at ALL sections of the page, not just top-level stats.\n"
+    ),
+}
+
 
 def _build_strict_prompt(
     prompt_spec: PromptSpec,
@@ -168,6 +193,13 @@ def _build_strict_prompt(
             f"Search through ALL stat sections on the page to find these fields.\n"
         )
 
+    # Domain-specific prompt hints
+    domain_hints = ""
+    for entry in required_domains:
+        hint = _DOMAIN_PROMPT_HINTS.get(entry["domain"], "")
+        if hint:
+            domain_hints += f"\n{hint}\n"
+
     return (
         f"Market question: {market.question}\n\n"
         f"Resolution rules:\n{rules_text}\n\n"
@@ -176,7 +208,8 @@ def _build_strict_prompt(
         f"Predicate: {semantics.predicate}\n"
         f"Threshold: {semantics.threshold or 'N/A'}\n"
         f"{fields_hint}"
-        f"{url_section}\n"
+        f"{url_section}"
+        f"{domain_hints}\n"
         f"MANDATORY DATA SOURCES — search ONLY these domains: {domains_str}\n"
         f"Use these exact searches:\n"
         f"{search_instructions}\n\n"

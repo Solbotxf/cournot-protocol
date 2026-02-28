@@ -275,6 +275,26 @@ class TestBuildStrictPrompt:
         assert "'Corners'" in prompt
         assert "Expected data fields" in prompt
 
+    def test_includes_domain_hint_for_fbref(self):
+        """When required domain is fbref.com, the prompt should include the domain hint."""
+        spec = _create_spec_with_sources()
+        req = spec.data_requirements[0]
+        # Use fbref.com as the required domain
+        fbref_domains = [{"domain": "fbref.com"}]
+        prompt = _build_strict_prompt(spec, req, fbref_domains)
+        assert "DOMAIN HINT (fbref.com)" in prompt
+        assert "FBRef.com match report" in prompt
+        assert "Player stats table" in prompt
+
+    def test_no_domain_hint_for_unknown_domain(self):
+        """Unknown domains should not have any domain hint in the prompt."""
+        spec = _create_spec_with_sources()
+        req = spec.data_requirements[0]
+        from agents.collector.gemini_grounded_agent import _extract_required_domains
+        domains = _extract_required_domains(req)  # fotmob.com
+        prompt = _build_strict_prompt(spec, req, domains)
+        assert "DOMAIN HINT" not in prompt
+
 
 # ---------------------------------------------------------------------------
 # Tests: Serper URL discovery
@@ -1163,44 +1183,6 @@ class TestGenericDirectExtraction:
             mock_ext.extract_and_summarize.return_value = (
                 "Match summary text here",
                 {"fotmob_match_id": "123", "fotmob_home_team": "Osasuna"},
-            )
-            mock_find.return_value = mock_ext
-
-            ctx = AgentContext.create_minimal()
-            ctx.http = MagicMock()
-            spec = _create_shots_spec()
-            result = agent.run(ctx, spec, ToolPlan(
-                plan_id="tp_shots", requirements=["req_shots_001"], sources=["web"],
-            ))
-
-        assert result.success
-        item = result.output[0].items[0]
-        assert item.extracted_fields.get("direct_extraction") is True
-        assert item.extracted_fields.get("resolution_method") == "llm_with_structured_data"
-
-    def test_dispatches_to_fbref_extractor(self):
-        """FBRef URL should be handled by the fbref extractor."""
-        discovered = [
-            {"url": "https://fbref.com/en/matches/7e6892e4/Brentford-Arsenal-Feb-12-Premier-League",
-             "title": "Match Report", "snippet": "..."},
-        ]
-
-        agent = CollectorSourcePinned()
-        mock_client = MagicMock()
-        mock_client.models.generate_content.return_value = _mock_llm_response(
-            outcome="Yes", reason="Arsenal had 12 shots on target."
-        )
-
-        with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
-             patch.object(agent, "_get_client", return_value=mock_client), \
-             patch.object(agent, "_serper_discover_urls", return_value=discovered), \
-             patch("agents.collector.source_pinned_agent.find_extractor") as mock_find:
-            mock_ext = MagicMock()
-            mock_ext.source_id = "fbref"
-            mock_ext.can_handle.return_value = True
-            mock_ext.extract_and_summarize.return_value = (
-                "Player stats from FBRef...",
-                {"fbref_game_id": "7e6892e4", "source_url": "https://fbref.com/en/matches/7e6892e4/..."},
             )
             mock_find.return_value = mock_ext
 
