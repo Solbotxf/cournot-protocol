@@ -83,8 +83,8 @@ class ResolveRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt output)"
     )
-    collectors: list[Literal["CollectorBrowse", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorOpenSearch", "CollectorDomainPinned", "CollectorCRP"]] = Field(
-        default=["CollectorBrowse"],
+    collectors: list[Literal["CollectorWebPageReader", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorOpenSearch", "CollectorDomainPinned", "CollectorCRP"]] = Field(
+        default=["CollectorWebPageReader"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
     )
@@ -134,8 +134,8 @@ class CollectRequest(BaseModel):
     tool_plan: dict[str, Any] = Field(
         ..., description="Tool execution plan (from /step/prompt)"
     )
-    collectors: list[Literal["CollectorBrowse", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorOpenSearch", "CollectorDomainPinned", "CollectorCRP"]] = Field(
-        default=["CollectorBrowse"],
+    collectors: list[Literal["CollectorWebPageReader", "CollectorHyDE", "CollectorHTTP", "CollectorMock", "CollectorAgenticRAG", "CollectorGraphRAG", "CollectorPAN", "CollectorOpenSearch", "CollectorDomainPinned", "CollectorCRP"]] = Field(
+        default=["CollectorWebPageReader"],
         description="Which collector agents to use (runs all in sequence)",
         min_length=1,
     )

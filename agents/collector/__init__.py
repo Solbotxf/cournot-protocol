@@ -17,7 +17,7 @@ Usage:
 
 from .agent import (
     CollectorHTTP,
-    CollectorBrowse,
+    CollectorWebPageReader,
     CollectorGraphRAG,
     CollectorMock,
     collect_evidence,
@@ -45,7 +45,7 @@ from .adapters import (
 __all__ = [
     # Agents
     "CollectorHTTP",
-    "CollectorBrowse",
+    "CollectorWebPageReader",
     "CollectorGraphRAG",
     "CollectorMock",
     "PANCollectorAgent",

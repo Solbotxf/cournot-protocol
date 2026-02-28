@@ -9,7 +9,7 @@ multiple execution paths and keeps the one with the highest score.
 The workflow is written *as if* every LLM call succeeds.  The runtime
 handles exploration of alternatives — no retry loops in the workflow.
 
-Compatible interface: same inputs/outputs as CollectorBrowse.
+Compatible interface: same inputs/outputs as CollectorWebPageReader.
 """
 
 from __future__ import annotations
@@ -233,7 +233,7 @@ class PANCollectorConfig:
 
 
 # ---------------------------------------------------------------------------
-# System prompts (reused from CollectorBrowse)
+# System prompts (reused from CollectorWebPageReader)
 # ---------------------------------------------------------------------------
 
 DISCOVERY_QUERY_SYSTEM_PROMPT = """
@@ -804,7 +804,7 @@ class PANCollectorAgent(BaseAgent):
         )
 
     # ------------------------------------------------------------------
-    # Validation (same as CollectorBrowse)
+    # Validation (same as CollectorWebPageReader)
     # ------------------------------------------------------------------
 
     def _validate_output(

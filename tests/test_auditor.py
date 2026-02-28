@@ -436,7 +436,7 @@ class TestMultipleBundles:
             bundle_id="bundle_1",
             market_id="mk_test123",
             plan_id="plan_test123",
-            collector_name="CollectorBrowse",
+            collector_name="CollectorWebPageReader",
         )
         bundle1.add_item(EvidenceItem(
             evidence_id="ev_001",
@@ -511,7 +511,7 @@ class TestMultipleBundles:
             bundle_id="bundle_2",
             market_id="mk_test123",
             plan_id="plan_test123",
-            collector_name="CollectorBrowse",
+            collector_name="CollectorWebPageReader",
         )
         bundle2.add_item(EvidenceItem(
             evidence_id="ev_002",
@@ -548,7 +548,7 @@ class TestMultipleBundles:
             bundle_id="bundle_2",
             market_id="mk_test123",
             plan_id="plan_test123",
-            collector_name="CollectorBrowse",
+            collector_name="CollectorWebPageReader",
         )
 
         auditor = AuditorRuleBased()

@@ -4,7 +4,7 @@ Collector Agent
 Executes ToolPlans to collect evidence from external sources.
 
 Three implementations:
-- CollectorBrowse: Uses LLM web browsing to fetch and interpret content (preferred)
+- CollectorWebPageReader: Uses LLM web browsing to fetch and interpret content (preferred)
 - CollectorHTTP: Makes real HTTP requests (production)
 - CollectorMock: Returns mock data (testing)
 
@@ -403,7 +403,7 @@ You MUST return a single, valid JSON object. Do not include markdown formatting 
 """
 
 
-class CollectorBrowse(BaseAgent):
+class CollectorWebPageReader(BaseAgent):
     """Browse-based collector.
 
     Uses an LLM with web browsing capability to fetch and interpret specific
@@ -411,7 +411,7 @@ class CollectorBrowse(BaseAgent):
     Supports deferred source discovery via search.
     """
 
-    _name = "CollectorBrowse"
+    _name = "CollectorWebPageReader"
     _version = "v1"
     _capabilities = {AgentCapability.LLM}
     MAX_RETRIES = 2
@@ -433,7 +433,7 @@ class CollectorBrowse(BaseAgent):
         Returns:
             AgentResult with (EvidenceBundle, ToolExecutionLog) as output
         """
-        ctx.info(f"CollectorBrowse executing plan {tool_plan.plan_id}")
+        ctx.info(f"CollectorWebPageReader executing plan {tool_plan.plan_id}")
 
         if ctx.llm is None:
             return AgentResult.failure(error="LLM client not available")
@@ -3477,7 +3477,7 @@ def get_collector(
     if prefer_hyde and ctx.llm is not None and ctx.http is not None:
         return CollectorHyDE()
     if prefer_llm and ctx.llm is not None:
-        return CollectorBrowse()
+        return CollectorWebPageReader()
     if prefer_http and ctx.http is not None:
         return CollectorHTTP()
     return CollectorMock(mock_responses=mock_responses)
@@ -3602,8 +3602,8 @@ def _register_agents() -> None:
 
     register_agent(
         step=AgentStep.COLLECTOR,
-        name="CollectorBrowse",
-        factory=lambda ctx: CollectorBrowse(),
+        name="CollectorWebPageReader",
+        factory=lambda ctx: CollectorWebPageReader(),
         capabilities={AgentCapability.LLM},
         priority=180,  # 3rd — preferred when LLM available
         metadata={"description": "Browses specific URLs to fetch and interpret page content. Extracts structured data with automatic repair. Supports deferred source discovery via search."},

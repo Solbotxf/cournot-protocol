@@ -98,11 +98,11 @@ class CollectionEngine:
                 ctx.warning(f"Requirement {req_id} not found in prompt_spec")
                 continue
             
-            # Skip deferred requirements — they need CollectorBrowse
+            # Skip deferred requirements — they need CollectorWebPageReader
             if requirement.deferred_source_discovery:
                 ctx.warning(
                     f"Requirement {req_id} uses deferred_source_discovery "
-                    "but CollectionEngine cannot discover sources (needs CollectorBrowse)"
+                    "but CollectionEngine cannot discover sources (needs CollectorWebPageReader)"
                 )
                 continue
 
