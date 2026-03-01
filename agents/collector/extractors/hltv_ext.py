@@ -41,25 +41,31 @@ class HLTVPlayerWeaponStatsExtractor(SiteExtractor):
 
         from google.genai import types
 
-        prompt = (
+        base_instructions = (
             "You are extracting structured data from an HLTV stats page.\n"
             "Read the provided URL using UrlContext and extract the player's weapon statistics.\n\n"
             f"URL: {url}\n\n"
             "Return ONLY valid JSON (no markdown) with this schema:\n"
             "{\n"
             '  "awp_kills": <integer or null>,\n'
-            '  "notes": "brief note describing where the value was found (table/row/column)"\n'
+            '  "awp_row_quote": "verbatim short excerpt of the AWP row/line",\n'
+            '  "notes": "where it was found (table/row/column)"\n'
             "}\n\n"
             "Rules:\n"
             "- You MUST locate any weapon breakdown section (table or list).\n"
             "- Find the weapon labeled 'AWP' (case-insensitive).\n"
             "- Extract the numeric count of kills/frags with the AWP (integer).\n"
-            "- If multiple AWP numbers exist, prefer the one that represents KILLS/FRAGS, not damage or percentage.\n"
+            "- Include awp_row_quote as a verbatim excerpt that contains both 'AWP' and the number.\n"
             "- If the AWP value cannot be determined, set awp_kills to null and explain in notes.\n"
         )
 
-        def _call(target_url: str) -> Any:
-            p = prompt.replace(f"URL: {url}", f"URL: {target_url}")
+        def _call(target_url: str, *, force_dump: bool = False) -> Any:
+            p = base_instructions.replace(f"URL: {url}", f"URL: {target_url}")
+            if force_dump:
+                p += (
+                    "\nIf you cannot find an AWP row, do this instead: return awp_kills=null and set awp_row_quote to the closest line you can find that mentions 'AWP'. "
+                    "If the page contains NO mention of AWP at all, say that in notes."
+                )
             return gemini_client.models.generate_content(
                 model=gemini_model,
                 contents=p,
@@ -76,8 +82,8 @@ class HLTVPlayerWeaponStatsExtractor(SiteExtractor):
 
         last_raw = ""
         obj: dict[str, Any] | None = None
-        for cu in candidate_urls:
-            resp = _call(cu)
+        for idx, cu in enumerate(candidate_urls):
+            resp = _call(cu, force_dump=(idx > 0))
 
             # Extract text parts
             texts: list[str] = []
@@ -121,6 +127,7 @@ class HLTVPlayerWeaponStatsExtractor(SiteExtractor):
                 awp_kills = None
 
         notes = str(obj.get("notes") or "")
+        awp_row_quote = str(obj.get("awp_row_quote") or "")
 
         if awp_kills is None:
             summary = f"HLTV weapon stats: could not extract AWP kills/frags from {url}. Notes: {notes}"
@@ -130,5 +137,6 @@ class HLTVPlayerWeaponStatsExtractor(SiteExtractor):
         meta = {
             "source_url": url,
             "awp_kills": awp_kills,
+            "awp_row_quote": awp_row_quote,
         }
         return summary, meta
