@@ -1001,7 +1001,16 @@ class CollectorSitePinned(CollectorOpenSearch):
                 text = getattr(part, "text", None)
                 if text:
                     texts.append(text)
-        return "\n".join(texts)
+        if texts:
+            return "\n".join(texts)
+
+        # Fallback: google-genai sometimes exposes a convenience `.text` field
+        # even when candidate parts are empty.
+        t = getattr(response, "text", None)
+        if isinstance(t, str) and t.strip():
+            return t.strip()
+
+        return ""
 
     @staticmethod
     def _extract_url_context_metadata(response: Any) -> list[dict[str, str]]:
