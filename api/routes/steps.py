@@ -698,6 +698,14 @@ async def run_audit(request: AuditRequest) -> AuditResponse:
         if not evidence_bundles:
             return AuditResponse(ok=False, errors=["No evidence bundles provided"])
 
+        # Filter out bundles that contain no successful evidence items.
+        evidence_bundles = [
+            b for b in evidence_bundles
+            if any(getattr(it, "success", False) for it in (b.items or []))
+        ]
+        if not evidence_bundles:
+            return AuditResponse(ok=False, errors=["No successful evidence in provided bundles"])
+
         override = build_llm_override(
             request.llm_provider, request.llm_model, agent_name="auditor",
         )
@@ -753,6 +761,14 @@ async def run_judge(request: JudgeRequest) -> JudgeResponse:
 
         if not evidence_bundles:
             return JudgeResponse(ok=False, errors=["No evidence bundles provided"])
+
+        # Filter out bundles that contain no successful evidence items.
+        evidence_bundles = [
+            b for b in evidence_bundles
+            if any(getattr(it, "success", False) for it in (b.items or []))
+        ]
+        if not evidence_bundles:
+            return JudgeResponse(ok=False, errors=["No successful evidence in provided bundles"])
 
         try:
             reasoning_trace = ReasoningTrace(**request.reasoning_trace)
@@ -822,7 +838,14 @@ async def run_bundle(request: BundleRequest) -> BundleResponse:
         if not evidence_bundles:
             return BundleResponse(ok=False, errors=["No evidence bundles provided"])
 
-        # Use first bundle for PoR computation
+        # Use first bundle that contains successful evidence for PoR computation
+        evidence_bundles = [
+            b for b in evidence_bundles
+            if any(getattr(it, "success", False) for it in (b.items or []))
+        ]
+        if not evidence_bundles:
+            return BundleResponse(ok=False, errors=["No successful evidence in provided bundles"])
+
         evidence_bundle = evidence_bundles[0]
 
         try:
