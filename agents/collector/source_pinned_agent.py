@@ -408,7 +408,7 @@ class CollectorSitePinned(CollectorOpenSearch):
                     continue
 
                 data = response.json()
-                organic = data.get("organic", [])
+                organic = data.get("organic") or []
 
                 for result in organic:
                     url = result.get("link", "")
