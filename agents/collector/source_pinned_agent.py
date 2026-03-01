@@ -106,6 +106,12 @@ The JSON MUST have exactly these two keys: "outcome" and "reason".
 # what to look for when reading the page via UrlContext.
 
 _DOMAIN_PROMPT_HINTS: dict[str, str] = {
+    "hltv.org": (
+        "DOMAIN HINT (hltv.org):\n"
+        "You are reading HLTV pages. For weapon statistics markets, you MUST locate the player stats/weapon table. "
+        "Look for a row labeled 'AWP' and extract the number of kills/frags with the AWP for the specified event stage (playoffs if specified). "
+        "If you cannot find the weapon table on the provided URLs, say so.\n"
+    ),
     "fbref.com": (
         "DOMAIN HINT (fbref.com):\n"
         "You are reading a FBRef.com match report page. Extract ALL match data "
@@ -647,10 +653,25 @@ class CollectorSitePinned(CollectorOpenSearch):
                 ctx, client, prompt_spec, requirement, required_domains,
             )
 
-            # Prefer Serper discovery when available (more likely to find the
-            # correct event page). Fall back to explicit source_targets only
-            # when Serper yields nothing.
-            discovered_urls: list[dict[str, str]] = serper_urls or seeded_urls
+            def _is_deep_source_target(u: str) -> bool:
+                try:
+                    p = urlparse(u)
+                    path = (p.path or "")
+                    return any(seg in path for seg in ("/stats/", "/en/matches/", "/matches/")) or bool(p.query)
+                except Exception:
+                    return False
+
+            deep_seeded = [u for u in seeded_urls if _is_deep_source_target(u.get("url", ""))]
+
+            # Prefer Serper discovery for finding the right page, but always
+            # prepend deep explicit source_target URLs (e.g. HLTV stats pages)
+            # since they are often the canonical contract source.
+            discovered_urls: list[dict[str, str]] = []
+            if deep_seeded:
+                discovered_urls.extend(deep_seeded)
+            for u in (serper_urls or seeded_urls):
+                if u.get("url") and all(u["url"] != x.get("url") for x in discovered_urls):
+                    discovered_urls.append(u)
             record.input["discovered_urls"] = [u["url"] for u in discovered_urls]
 
             # --- Phase 1.5: Direct extraction via extractor registry ---
@@ -942,11 +963,11 @@ class CollectorSitePinned(CollectorOpenSearch):
         find the ``{...}`` block regardless of which part it's in.
         """
         texts: list[str] = []
-        for candidate in getattr(response, "candidates", []):
+        for candidate in getattr(response, "candidates", []) or []:
             content = getattr(candidate, "content", None)
             if content is None:
                 continue
-            for part in getattr(content, "parts", []):
+            for part in (getattr(content, "parts", None) or []):
                 text = getattr(part, "text", None)
                 if text:
                     texts.append(text)
