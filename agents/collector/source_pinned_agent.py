@@ -959,7 +959,7 @@ class CollectorSitePinned(CollectorOpenSearch):
             meta = getattr(candidate, "url_context_metadata", None)
             if meta is None:
                 continue
-            for url_meta in getattr(meta, "url_metadata", []):
+            for url_meta in (getattr(meta, "url_metadata", None) or []):
                 url = getattr(url_meta, "retrieved_url", "")
                 status_enum = getattr(url_meta, "url_retrieval_status", None)
                 status = "unknown"
