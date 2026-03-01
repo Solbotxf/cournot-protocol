@@ -504,6 +504,27 @@ class CollectorSitePinned(CollectorOpenSearch):
             )
             return None
 
+        # If extractor returned a deterministic numeric stat, resolve
+        # without another LLM call.
+        if extractor.source_id == "hltv" and ext_metadata.get("awp_kills") is not None:
+            awp_kills = ext_metadata.get("awp_kills")
+            outcome = "Yes" if int(awp_kills) > 0 else "No"
+            reason = (
+                f"HLTV weapon stats show AWP kills/frags = {awp_kills} "
+                f"on {match_url}."
+            )
+            metadata = {
+                "direct_extraction": True,
+                "resolution_method": "deterministic_structured_data",
+                "extractor_source_id": extractor.source_id,
+                **ext_metadata,
+            }
+            ctx.info(
+                f"[SourcePinned] {extractor.source_id} deterministic resolution SUCCESS: "
+                f"outcome={outcome}, awp_kills={awp_kills}"
+            )
+            return outcome, reason, metadata
+
         # Build LLM prompt (domain-agnostic)
         market = prompt_spec.market
         semantics = prompt_spec.prediction_semantics

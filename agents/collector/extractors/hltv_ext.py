@@ -21,7 +21,10 @@ class HLTVPlayerWeaponStatsExtractor(SiteExtractor):
         try:
             p = urlparse(url)
             host = (p.netloc or "").lower().lstrip("www.")
-            return host.endswith("hltv.org") and "/stats/players/" in (p.path or "")
+            path = (p.path or "")
+            return host.endswith("hltv.org") and (
+                "/stats/players/" in path or "/stats/players/weapon/" in path
+            )
         except Exception:
             return False
 
