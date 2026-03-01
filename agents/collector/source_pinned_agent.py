@@ -776,10 +776,9 @@ class CollectorSitePinned(CollectorOpenSearch):
                 ), record
 
             # --- Phase 2: Gemini with UrlContext + GoogleSearch ---
-            strict_prompt = _build_strict_prompt(
-                prompt_spec, requirement, required_domains,
-                discovered_urls=discovered_urls or None,
-            )
+            # We'll rotate which discovered URL(s) are presented first per
+            # attempt to mitigate per-URL blocks/timeouts.
+            strict_prompt_base = None  # built inside loop
 
             best_parsed: dict[str, Any] | None = None
             best_grounding: dict[str, Any] | None = None
@@ -797,9 +796,21 @@ class CollectorSitePinned(CollectorOpenSearch):
                     f"discovered_urls: {len(discovered_urls)})"
                 )
 
+                # Rotate URL subset
+                url_subset = None
+                if discovered_urls:
+                    # 1 URL per attempt (plus any deep seeded URL already prepended)
+                    idx = (attempt - 1) % len(discovered_urls)
+                    url_subset = [discovered_urls[idx]]
+
+                strict_prompt = _build_strict_prompt(
+                    prompt_spec, requirement, required_domains,
+                    discovered_urls=url_subset or (discovered_urls or None),
+                )
+
                 response = self._call_gemini_strict(
                     client, strict_prompt,
-                    discovered_urls=discovered_urls or None,
+                    discovered_urls=url_subset or (discovered_urls or None),
                 )
                 text = self._extract_text(response)
                 grounding = self._extract_grounding(response)
