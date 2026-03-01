@@ -866,8 +866,12 @@ class CollectorSitePinned(CollectorOpenSearch):
             ), record
 
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            ctx.error(f"[SourcePinned] Exception for {req_id}: {tb}")
             record.ended_at = ctx.now().isoformat()
-            record.error = str(e)
+            # Keep error short in artifacts, full traceback in logs
+            record.error = f"{type(e).__name__}: {e}"
 
             return EvidenceItem(
                 evidence_id=evidence_id,
@@ -879,7 +883,7 @@ class CollectorSitePinned(CollectorOpenSearch):
                     fetched_at=ctx.now(),
                 ),
                 success=False,
-                error=f"Gemini grounded strict call failed: {e}",
+                error=f"Gemini grounded strict call failed: {type(e).__name__}: {e}",
             ), record
 
     # ------------------------------------------------------------------
