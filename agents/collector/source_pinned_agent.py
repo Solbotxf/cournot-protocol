@@ -783,8 +783,17 @@ class CollectorSitePinned(CollectorOpenSearch):
                 text = self._extract_text(response)
                 grounding = self._extract_grounding(response)
                 url_ctx_meta = self._extract_url_context_metadata(response)
-                parsed = self._parse_json(text)
-                parsed = self._normalize_parsed(parsed)
+
+                try:
+                    parsed = self._parse_json(text)
+                    parsed = self._normalize_parsed(parsed)
+                except Exception as e:
+                    ctx.warning(
+                        f"[SourcePinned] Attempt {attempt}: failed to parse JSON response ({type(e).__name__}: {e}). "
+                        f"text_head={text[:80]!r}"
+                    )
+                    # Still accumulate metadata, then retry next attempt
+                    continue
 
                 # Accumulate metadata across attempts
                 all_grounding_sources.extend(grounding.get("sources", []))
