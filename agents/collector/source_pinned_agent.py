@@ -81,11 +81,9 @@ Your task:
 Rules:
 - FIRST, read the provided URLs from the required data source domain
   and try to extract the exact data requested.
-- If the specific data field is not visible in the provided URLs
-  (e.g. because the page uses dynamic JavaScript rendering), use
-  Google Search to find the same data from any reliable source.
-- When using supplementary sources, cross-reference with the required
-  domain page to ensure accuracy.
+- You MUST NOT use evidence from any other website. If you cannot
+  access or extract the required data from the required domain(s),
+  say so clearly in the reason.
 - Follow the resolution rules exactly.
 - Do NOT rely on training data — search the web.
 
@@ -629,10 +627,30 @@ class CollectorSitePinned(CollectorOpenSearch):
             ), record
 
         try:
-            # --- Phase 1: Serper URL discovery ---
-            discovered_urls = self._serper_discover_urls(
+            # --- Phase 0: Seed discovered URLs with explicit source_targets ---
+            # If the PromptSpec already includes concrete URLs on the required
+            # domain(s), use them directly (no need to discover via Serper).
+            seeded_urls: list[dict[str, str]] = []
+            for target in getattr(requirement, "source_targets", []) or []:
+                uri = getattr(target, "uri", "") or ""
+                if not uri:
+                    continue
+                parsed = urlparse(uri)
+                host = (parsed.netloc or "").lower().lstrip("www.")
+                if not host:
+                    continue
+                if any(rd.get("domain") in host or host in rd.get("domain") for rd in required_domains):
+                    seeded_urls.append({"url": uri, "title": "[source_target]", "snippet": ""})
+
+            # --- Phase 1: Serper URL discovery (optional) ---
+            serper_urls = self._serper_discover_urls(
                 ctx, client, prompt_spec, requirement, required_domains,
             )
+
+            # Prefer Serper discovery when available (more likely to find the
+            # correct event page). Fall back to explicit source_targets only
+            # when Serper yields nothing.
+            discovered_urls: list[dict[str, str]] = serper_urls or seeded_urls
             record.input["discovered_urls"] = [u["url"] for u in discovered_urls]
 
             # --- Phase 1.5: Direct extraction via extractor registry ---
@@ -789,12 +807,11 @@ class CollectorSitePinned(CollectorOpenSearch):
                 merged_grounding, required_domains,
             )
 
-            # If no required-domain sources found, include all sources
-            # for transparency but mark them as non-authoritative
+            # If no required-domain sources were found, keep evidence_sources
+            # empty and rely on data_source_covered=False. This prevents
+            # accidental off-domain resolution.
             if not evidence_sources:
-                evidence_sources = self._build_strict_evidence_sources(
-                    {"sources": all_grounding_sources}, required_domains,
-                )
+                evidence_sources = []
 
             outcome = final_parsed.get("outcome", "")
             reason = final_parsed.get("reason", "")

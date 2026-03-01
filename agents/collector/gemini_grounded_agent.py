@@ -609,21 +609,33 @@ class CollectorOpenSearch(BaseAgent):
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
-        """Parse JSON from Gemini response text, handling markdown fences."""
+        """Parse JSON from Gemini response text.
+
+        Gemini sometimes returns extra text or even multiple JSON objects.
+        We therefore:
+        1) strip markdown fences if present
+        2) locate the first "{" and then use JSONDecoder.raw_decode to parse
+           the first JSON object only (ignoring trailing text)
+        """
         text = text.strip()
 
         # Try stripping markdown code block (```json ... ```)
         fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if fence_match:
-            return json.loads(fence_match.group(1).strip())
+            text = fence_match.group(1).strip()
 
-        # Try raw {…} extraction
         start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            return json.loads(text[start:end])
+        if start >= 0:
+            decoder = json.JSONDecoder()
+            obj, _idx = decoder.raw_decode(text[start:])
+            if isinstance(obj, dict):
+                return obj
 
-        return json.loads(text)
+        # Fallback: attempt full parse
+        obj = json.loads(text)
+        if not isinstance(obj, dict):
+            raise ValueError("Expected JSON object")
+        return obj
 
     @staticmethod
     def _normalize_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
