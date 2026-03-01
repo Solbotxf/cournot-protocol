@@ -48,45 +48,70 @@ class HLTVPlayerWeaponStatsExtractor(SiteExtractor):
             "Return ONLY valid JSON (no markdown) with this schema:\n"
             "{\n"
             '  "awp_kills": <integer or null>,\n'
-            '  "notes": "brief note about where it was found"\n'
+            '  "notes": "brief note describing where the value was found (table/row/column)"\n'
             "}\n\n"
             "Rules:\n"
-            "- You MUST locate the weapon stats table and the row labeled 'AWP'.\n"
-            "- Extract the number of kills/frags with AWP (usually in a column named 'Kills' or similar).\n"
-            "- If the AWP row is not present or value cannot be determined, set awp_kills to null and explain in notes.\n"
+            "- You MUST locate any weapon breakdown section (table or list).\n"
+            "- Find the weapon labeled 'AWP' (case-insensitive).\n"
+            "- Extract the numeric count of kills/frags with the AWP (integer).\n"
+            "- If multiple AWP numbers exist, prefer the one that represents KILLS/FRAGS, not damage or percentage.\n"
+            "- If the AWP value cannot be determined, set awp_kills to null and explain in notes.\n"
         )
 
-        resp = gemini_client.models.generate_content(
-            model=gemini_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                tools=[types.Tool(url_context=types.UrlContext())],
-            ),
-        )
+        def _call(target_url: str) -> Any:
+            p = prompt.replace(f"URL: {url}", f"URL: {target_url}")
+            return gemini_client.models.generate_content(
+                model=gemini_model,
+                contents=p,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    tools=[types.Tool(url_context=types.UrlContext())],
+                ),
+            )
 
-        # Extract text parts
-        texts: list[str] = []
-        for cand in getattr(resp, "candidates", []) or []:
-            content = getattr(cand, "content", None)
-            if not content:
-                continue
-            for part in (getattr(content, "parts", None) or []):
-                t = getattr(part, "text", None)
-                if t:
-                    texts.append(t)
-        raw = "\n".join(texts).strip()
+        # Try the given URL first, then a weapon-history variant.
+        candidate_urls = [url]
+        if "/stats/players/" in url and "/stats/players/weapon/" not in url:
+            candidate_urls.append(url.replace("/stats/players/", "/stats/players/weapon/"))
 
-        # Parse first JSON object
-        try:
-            dec = json.JSONDecoder()
-            start = raw.find("{")
-            if start >= 0:
-                obj, _ = dec.raw_decode(raw[start:])
-            else:
-                obj = json.loads(raw)
-        except Exception as e:
-            raise ExtractionError(f"Gemini JSON parse failed: {e}; raw={raw[:200]}")
+        last_raw = ""
+        obj: dict[str, Any] | None = None
+        for cu in candidate_urls:
+            resp = _call(cu)
+
+            # Extract text parts
+            texts: list[str] = []
+            for cand in getattr(resp, "candidates", []) or []:
+                content = getattr(cand, "content", None)
+                if not content:
+                    continue
+                for part in (getattr(content, "parts", None) or []):
+                    t = getattr(part, "text", None)
+                    if t:
+                        texts.append(t)
+            raw = "\n".join(texts).strip()
+            last_raw = raw
+
+            # Parse first JSON object
+            try:
+                dec = json.JSONDecoder()
+                start = raw.find("{")
+                if start >= 0:
+                    parsed, _ = dec.raw_decode(raw[start:])
+                else:
+                    parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    obj = parsed
+            except Exception:
+                obj = None
+
+            if obj is not None and obj.get("awp_kills") is not None:
+                # success
+                url = cu
+                break
+
+        if obj is None:
+            raise ExtractionError(f"Gemini JSON parse failed; raw={last_raw[:200]}")
 
         awp_kills = obj.get("awp_kills")
         if awp_kills is not None:
