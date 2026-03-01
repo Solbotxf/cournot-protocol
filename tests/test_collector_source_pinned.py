@@ -605,12 +605,12 @@ class TestCollectorSitePinned:
             ctx = AgentContext.create_minimal()
             result = agent.run(ctx, _create_spec_with_sources(), _create_tool_plan())
 
-        assert result.success  # still succeeds with outcome
+        assert not result.success  # fail closed when required domain not covered
         assert call_count == 2  # tried max_attempts times
         item = result.output[0].items[0]
         assert item.provenance.tier == 2  # tier 2 because domain not found
         assert item.extracted_fields["data_source_covered"] is False
-        assert item.extracted_fields["confidence_score"] == 0.5  # reduced confidence
+        assert item.extracted_fields["confidence_score"] == 0.0  # fail closed
 
     def test_confidence_higher_when_domain_found(self):
         """Confidence should be 0.9 when domain found, 0.5 when not."""
@@ -1220,7 +1220,9 @@ class TestGenericDirectExtraction:
                 plan_id="tp_shots", requirements=["req_shots_001"], sources=["web"],
             ))
 
-        assert result.success
+        # Fail-closed: the discovered URL is off-domain (flashscore), so
+        # CollectorSitePinned should not succeed.
+        assert not result.success
         item = result.output[0].items[0]
         assert item.extracted_fields.get("direct_extraction") is not True
 
