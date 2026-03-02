@@ -169,3 +169,137 @@ class TestJudgeDisputeInjection:
         calls = ctx.llm.provider._calls
         messages = calls[0]["messages"]
         assert len(messages) == 2
+
+
+# --- Validation, Rerun Plan, Diff Summary tests ---
+
+class TestDisputeValidation:
+    def test_reasoning_only_cannot_target_collect(self):
+        from api.routes.dispute import validate_dispute_request, DisputeRequest, DisputeTarget, DisputeContext
+        req = DisputeRequest(
+            mode="reasoning_only",
+            target=DisputeTarget(step="collect"),
+            reason_code="EVIDENCE_MISSING",
+            message="Evidence is missing",
+            context=DisputeContext(
+                prompt_spec={},
+                evidence_bundle=[{}],
+            ),
+        )
+        errors = validate_dispute_request(req)
+        assert len(errors) > 0
+        assert "reasoning_only" in errors[0]
+
+    def test_reasoning_only_cannot_target_prompt_spec(self):
+        from api.routes.dispute import validate_dispute_request, DisputeRequest, DisputeTarget, DisputeContext
+        req = DisputeRequest(
+            mode="reasoning_only",
+            target=DisputeTarget(step="prompt_spec"),
+            reason_code="SPEC_AMBIGUOUS",
+            message="Spec is ambiguous",
+            context=DisputeContext(
+                prompt_spec={},
+                evidence_bundle=[{}],
+            ),
+        )
+        errors = validate_dispute_request(req)
+        assert len(errors) > 0
+
+    def test_patch_whitelist_rejects_disallowed_keys(self):
+        from api.routes.dispute import validate_dispute_request, DisputeRequest, DisputeTarget, DisputeContext
+        req = DisputeRequest(
+            mode="reasoning_only",
+            target=DisputeTarget(step="audit"),
+            reason_code="REASONING_STEP_INCORRECT",
+            message="Wrong step",
+            patch={"source_targets": ["new_source"]},
+            context=DisputeContext(
+                prompt_spec={},
+                evidence_bundle=[{}],
+            ),
+        )
+        errors = validate_dispute_request(req)
+        assert len(errors) > 0
+        assert "source_targets" in errors[0]
+
+    def test_patch_whitelist_allows_valid_keys(self):
+        from api.routes.dispute import validate_dispute_request, DisputeRequest, DisputeTarget, DisputeContext
+        req = DisputeRequest(
+            mode="reasoning_only",
+            target=DisputeTarget(step="judge"),
+            reason_code="VERDICT_WRONG_MAPPING",
+            message="Wrong mapping",
+            patch={"confidence_override": 0.3},
+            context=DisputeContext(
+                prompt_spec={},
+                evidence_bundle=[{}],
+                reasoning_trace={},
+            ),
+        )
+        errors = validate_dispute_request(req)
+        assert len(errors) == 0
+
+    def test_judge_requires_reasoning_trace(self):
+        from api.routes.dispute import validate_dispute_request, DisputeRequest, DisputeTarget, DisputeContext
+        req = DisputeRequest(
+            mode="reasoning_only",
+            target=DisputeTarget(step="judge"),
+            reason_code="VERDICT_WRONG_MAPPING",
+            message="Wrong mapping",
+            context=DisputeContext(
+                prompt_spec={},
+                evidence_bundle=[{}],
+                reasoning_trace=None,
+            ),
+        )
+        errors = validate_dispute_request(req)
+        assert len(errors) > 0
+        assert "reasoning_trace" in errors[0]
+
+
+class TestRerunPlan:
+    def test_judge_only(self):
+        from api.routes.dispute import compute_rerun_plan
+        assert compute_rerun_plan("judge") == ["judge"]
+
+    def test_audit_then_judge(self):
+        from api.routes.dispute import compute_rerun_plan
+        assert compute_rerun_plan("audit") == ["audit", "judge"]
+
+    def test_collect_chain(self):
+        from api.routes.dispute import compute_rerun_plan
+        assert compute_rerun_plan("collect") == ["collect", "audit", "judge"]
+
+    def test_prompt_spec_full_chain(self):
+        from api.routes.dispute import compute_rerun_plan
+        assert compute_rerun_plan("prompt_spec") == ["collect", "audit", "judge"]
+
+
+class TestDiffSummary:
+    def test_verdict_changed(self):
+        from api.routes.dispute import compute_diff_summary
+        from core.schemas.verdict import DeterministicVerdict
+        old = DeterministicVerdict(market_id="mk_1", outcome="YES", confidence=0.9, resolution_rule_id="R_1")
+        new = DeterministicVerdict(market_id="mk_1", outcome="NO", confidence=0.8, resolution_rule_id="R_1")
+        diff = compute_diff_summary(["audit", "judge"], old, new)
+        assert diff.verdict_changed is True
+        assert diff.outcome_before == "YES"
+        assert diff.outcome_after == "NO"
+
+    def test_verdict_same(self):
+        from api.routes.dispute import compute_diff_summary
+        from core.schemas.verdict import DeterministicVerdict
+        old = DeterministicVerdict(market_id="mk_1", outcome="YES", confidence=0.9, resolution_rule_id="R_1")
+        new = DeterministicVerdict(market_id="mk_1", outcome="YES", confidence=0.9, resolution_rule_id="R_1")
+        diff = compute_diff_summary(["judge"], old, new)
+        assert diff.verdict_changed is False
+
+    def test_confidence_changed(self):
+        from api.routes.dispute import compute_diff_summary
+        from core.schemas.verdict import DeterministicVerdict
+        old = DeterministicVerdict(market_id="mk_1", outcome="YES", confidence=0.9, resolution_rule_id="R_1")
+        new = DeterministicVerdict(market_id="mk_1", outcome="YES", confidence=0.7, resolution_rule_id="R_1")
+        diff = compute_diff_summary(["judge"], old, new)
+        assert diff.verdict_changed is False
+        assert diff.confidence_before == 0.9
+        assert diff.confidence_after == 0.7
