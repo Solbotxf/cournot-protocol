@@ -14,6 +14,8 @@ from core.schemas import (
     PredictionSemantics,
     PromptSpec,
     Provenance,
+    ReasoningStep,
+    ReasoningTrace,
     ResolutionRule,
     ResolutionRules,
     ResolutionWindow,
@@ -122,3 +124,48 @@ class TestAuditorDisputeInjection:
         calls = ctx.llm.provider._calls
         messages = calls[0]["messages"]
         assert len(messages) == 2  # system, user_prompt only
+
+
+def _make_test_reasoning_trace():
+    return ReasoningTrace(
+        trace_id="trace_test",
+        market_id="mk_test",
+        bundle_id="eb_test",
+        steps=[ReasoningStep(
+            step_id="step_001", step_type="threshold_check",
+            description="Compare price",
+        )],
+        preliminary_outcome="YES",
+        preliminary_confidence=0.9,
+        recommended_rule_id="R_THRESHOLD",
+    )
+
+
+class TestJudgeDisputeInjection:
+    def test_dispute_context_appended_to_judge_messages(self):
+        """When dispute_context is in ctx.extra, judge LLM should receive dispute instruction."""
+        ctx = AgentContext.create_mock(llm_responses=[_good_verdict_json()])
+        ctx.extra["dispute_context"] = {
+            "reason_code": "VERDICT_WRONG_MAPPING",
+            "message": "The verdict should be NO",
+            "leaf_path": None,
+            "target_step": "judge",
+            "patch": None,
+        }
+        from agents.judge.agent import JudgeLLM
+        judge = JudgeLLM()
+        judge.run(ctx, _make_test_prompt_spec(), [_make_test_evidence_bundle()], _make_test_reasoning_trace())
+        calls = ctx.llm.provider._calls
+        messages = calls[0]["messages"]
+        assert len(messages) == 3
+        assert "DISPUTE CONTEXT" in messages[2]["content"]
+
+    def test_no_dispute_context_keeps_normal_judge_messages(self):
+        """Without dispute_context, judge message count is 2."""
+        ctx = AgentContext.create_mock(llm_responses=[_good_verdict_json()])
+        from agents.judge.agent import JudgeLLM
+        judge = JudgeLLM()
+        judge.run(ctx, _make_test_prompt_spec(), [_make_test_evidence_bundle()], _make_test_reasoning_trace())
+        calls = ctx.llm.provider._calls
+        messages = calls[0]["messages"]
+        assert len(messages) == 2

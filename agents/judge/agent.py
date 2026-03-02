@@ -209,7 +209,13 @@ class JudgeLLM(BaseAgent):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
-        
+
+        # Inject dispute context if present (dispute-driven rerun)
+        dispute_ctx = ctx.extra.get("dispute_context")
+        if dispute_ctx:
+            dispute_block = self._build_dispute_prompt(dispute_ctx)
+            messages.append({"role": "user", "content": dispute_block})
+
         # Get LLM response
         response = ctx.llm.chat(messages)
         raw_output = response.content
@@ -237,6 +243,29 @@ class JudgeLLM(BaseAgent):
         
         return {}
     
+    def _build_dispute_prompt(self, dispute_ctx: dict[str, Any]) -> str:
+        """Build a dispute injection block for the Judge LLM."""
+        parts = [
+            "## DISPUTE CONTEXT — This is a dispute-driven rerun.",
+            "",
+            f"Reason code: {dispute_ctx['reason_code']}",
+            f"Disputant message: {dispute_ctx['message']}",
+        ]
+        if dispute_ctx.get("leaf_path"):
+            parts.append(f"Disputed artifact path: {dispute_ctx['leaf_path']}")
+        if dispute_ctx.get("patch"):
+            parts.append(f"Patch applied: {json.dumps(dispute_ctx['patch'], indent=2)}")
+        parts.extend([
+            "",
+            "INSTRUCTIONS:",
+            "1. Evaluate the dispute point FIRST before rendering your verdict.",
+            "2. If the disputant raises a valid concern about the reasoning trace,",
+            "   adjust the outcome and/or confidence accordingly.",
+            "3. If the dispute is unfounded, confirm the original verdict and explain why.",
+            "4. Include a 'dispute_evaluation' field in your JSON output with your assessment.",
+        ])
+        return "\n".join(parts)
+
     def _extract_json(self, text: str) -> dict[str, Any]:
         """Extract JSON from LLM response."""
         # Try code block
