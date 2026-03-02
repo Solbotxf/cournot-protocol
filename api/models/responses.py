@@ -111,6 +111,42 @@ class ErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     """Standard error response."""
-    
+
     ok: bool = False
     error: ErrorDetail = Field(..., description="Error details")
+
+
+# -----------------------------------------------------------------------------
+# Dispute (off-chain)
+# -----------------------------------------------------------------------------
+
+
+class DisputeChallengeRef(BaseModel):
+    """Challenge reference for dispute verify."""
+
+    kind: str = Field(
+        ..., description="Challenge kind (MVP enum): pack_format/pack_missing/manifest_invalid/evidence_leaf/reasoning_leaf/verdict_hash/por_bundle"
+    )
+    leaf_index: int | None = Field(default=None, description="Best-effort leaf index (optional)")
+    expected: str | None = Field(default=None, description="Expected value (optional)")
+    got: str | None = Field(default=None, description="Actual value (optional)")
+    reason: str | None = Field(default=None, description="Human-readable reason")
+
+
+class DisputeVerifyResponse(BaseModel):
+    """Response schema for POST /dispute/verify.
+
+    Note: ok=false still returns 200 for verification failures.
+    400 is reserved for invalid requests.
+    """
+
+    ok: bool = Field(..., description="Overall dispute verification status")
+    por_root: str | None = Field(..., description="Computed or pack por_root (if available)")
+    expected_por_root: str | None = Field(default=None, description="Optional expected por_root")
+    pack_uri: str = Field(..., description="Pack URI (path or user-provided URI)")
+    sentinel_version: str = Field(..., description="Sentinel version string")
+    timestamp: str | None = Field(..., description="RFC3339 timestamp")
+    market_id: str | None = Field(default=None, description="Market id if available")
+    challenge_ref: DisputeChallengeRef | None = Field(default=None, description="Challenge reference")
+    errors: list[str] = Field(default_factory=list, description="Errors/notes")
+    checks: list[dict[str, Any]] = Field(default_factory=list, description="Best-effort checks")
