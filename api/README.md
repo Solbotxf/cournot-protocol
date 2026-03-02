@@ -86,6 +86,89 @@ Returns a ZIP file with all artifacts. Headers include:
 - `X-Outcome`
 - `X-Confidence`
 
+### Dispute Verify (Off-chain)
+
+```bash
+POST /dispute/verify
+Content-Type: multipart/form-data
+```
+
+**Parameters (multipart/form-data):**
+- `file` (required): pack zip file
+- `expected_por_root` (optional): string
+- `pack_uri` (optional): string (e.g. ipfs://CID)
+- `baseline_file` (optional): pack zip file (improves best-effort leaf_index)
+
+**cURL (valid pack):**
+```bash
+curl -s -X POST http://localhost:8000/dispute/verify \
+  -F "file=@result.zip" | python3 -m json.tool
+```
+
+**cURL (tamper evidence):**
+```bash
+curl -s -X POST http://localhost:8000/dispute/verify \
+  -F "file=@tampered.zip" | python3 -m json.tool
+```
+
+**Python (requests):**
+```python
+import requests
+
+with open("tampered.zip", "rb") as f:
+    r = requests.post(
+        "http://localhost:8000/dispute/verify",
+        files={"file": ("pack.zip", f, "application/zip")},
+        data={"pack_uri": "ipfs://<CID>", "expected_por_root": "0x..."},
+    )
+print(r.status_code)
+print(r.json())
+```
+
+**Missing file (400):**
+```bash
+curl -i -X POST http://localhost:8000/dispute/verify
+```
+
+This is the **dispute / challenge verifier**. It is intended to provide a stable off-chain verification primitive.
+
+**Python API (preferred, reusable):**
+
+```python
+from api.dispute_verify import verify_pack
+
+report = verify_pack(
+    "./result.zip",
+    expected_por_root=None,
+    pack_uri="ipfs://<CID>",
+)
+print(report["ok"], report.get("challenge_ref"))
+```
+
+**Challenge kinds (MVP):**
+- `pack_missing` — pack path not found / required files missing
+- `manifest_invalid` — manifest load/format/hash mismatch
+- `evidence_leaf` — evidence_root mismatch
+- `reasoning_leaf` — reasoning_root mismatch
+- `verdict_hash` — verdict.json mismatch vs `por_bundle.verdict_hash`
+- `por_bundle` — PoR bundle structure/por_root mismatch
+
+**Example: valid pack**
+```json
+{ "ok": true, "por_root": "0x...", "pack_uri": "./result.zip", "errors": [] }
+```
+
+**Example: tamper evidence**
+```json
+{
+  "ok": false,
+  "challenge_ref": {"kind": "evidence_leaf", "leaf_index": null, "reason": "evidence_root mismatch"},
+  "errors": ["leaf_index unavailable with single-pack verification; provide baseline_pack to improve localization"],
+  "por_root": "0x...",
+  "pack_uri": "./tampered.zip"
+}
+```
+
 ### Verify Pack
 
 ```bash

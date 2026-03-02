@@ -34,7 +34,7 @@ import traceback
 from pathlib import Path
 from typing import Sequence
 
-from cournot_cli.commands import run, verify, replay, pack, steps
+from cournot_cli.commands import run, verify, replay, pack, steps, dispute
 from cournot_cli.config import load_config, get_default_config_template, CLIConfig
 
 
@@ -174,6 +174,51 @@ def create_parser() -> argparse.ArgumentParser:
     )
     verify_parser.set_defaults(func=verify.verify_cmd)
     
+    # --- dispute command ---
+    dispute_parser = subparsers.add_parser(
+        "dispute",
+        help="Off-chain dispute tools (verify + challenge localization)",
+        description="Off-chain dispute verifier for Cournot artifact packs.",
+    )
+    dispute_subparsers = dispute_parser.add_subparsers(dest="dispute_cmd", help="Dispute subcommand")
+
+    dispute_verify = dispute_subparsers.add_parser(
+        "verify",
+        help="Verify an artifact pack for dispute purposes (stable JSON)",
+    )
+    dispute_verify.add_argument(
+        "pack",
+        type=str,
+        help="Pack input (directory or zip). MVP: local path only.",
+    )
+    dispute_verify.add_argument(
+        "--expected-por-root",
+        type=str,
+        default=None,
+        help="Optional expected por_root to compare against.",
+    )
+    dispute_verify.add_argument(
+        "--pack-uri",
+        type=str,
+        default=None,
+        help="Optional override for pack_uri in output (e.g. ipfs://CID).",
+    )
+    dispute_verify.add_argument(
+        "--baseline-pack",
+        type=str,
+        default=None,
+        help="Optional baseline pack to diff against to improve leaf_index localization.",
+    )
+    dispute_verify.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Only output JSON to stdout (no human summary on stderr).",
+    )
+    dispute_verify.set_defaults(func=dispute.dispute_verify_cmd)
+
+    dispute_parser.set_defaults(func=lambda args: dispute_parser.print_help() or EXIT_SUCCESS)
+
     # --- replay command ---
     replay_parser = subparsers.add_parser(
         "replay",
