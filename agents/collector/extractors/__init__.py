@@ -7,16 +7,19 @@ from __future__ import annotations
 
 from .base import ExtractionError, SiteExtractor
 from .fotmob_ext import FotMobExtractor
+from .hltv_ext import HLTVPlayerWeaponStatsExtractor
 
 __all__ = [
     "ExtractionError",
     "SiteExtractor",
     "FotMobExtractor",
+    "HLTVPlayerWeaponStatsExtractor",
     "find_extractor",
 ]
 
 _REGISTRY: list[SiteExtractor] = [
     FotMobExtractor(),
+    HLTVPlayerWeaponStatsExtractor(),
 ]
 
 

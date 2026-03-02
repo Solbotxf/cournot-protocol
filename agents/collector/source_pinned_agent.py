@@ -81,11 +81,9 @@ Your task:
 Rules:
 - FIRST, read the provided URLs from the required data source domain
   and try to extract the exact data requested.
-- If the specific data field is not visible in the provided URLs
-  (e.g. because the page uses dynamic JavaScript rendering), use
-  Google Search to find the same data from any reliable source.
-- When using supplementary sources, cross-reference with the required
-  domain page to ensure accuracy.
+- You MUST NOT use evidence from any other website. If you cannot
+  access or extract the required data from the required domain(s),
+  say so clearly in the reason.
 - Follow the resolution rules exactly.
 - Do NOT rely on training data — search the web.
 
@@ -108,6 +106,12 @@ The JSON MUST have exactly these two keys: "outcome" and "reason".
 # what to look for when reading the page via UrlContext.
 
 _DOMAIN_PROMPT_HINTS: dict[str, str] = {
+    "hltv.org": (
+        "DOMAIN HINT (hltv.org):\n"
+        "You are reading HLTV pages. For weapon statistics markets, you MUST locate the player stats/weapon table. "
+        "Look for a row labeled 'AWP' and extract the number of kills/frags with the AWP for the specified event stage (playoffs if specified). "
+        "If you cannot find the weapon table on the provided URLs, say so.\n"
+    ),
     "fbref.com": (
         "DOMAIN HINT (fbref.com):\n"
         "You are reading a FBRef.com match report page. Extract ALL match data "
@@ -249,6 +253,27 @@ class CollectorSitePinned(CollectorOpenSearch):
         super().__init__(model=model, **kwargs)
         self._max_attempts = max_attempts
         self._serper_max_urls = serper_max_urls
+
+    def run(
+        self,
+        ctx: "AgentContext",
+        prompt_spec: PromptSpec,
+        tool_plan: ToolPlan,
+    ) -> AgentResult:
+        """Run collection and fail-closed when no successful evidence exists.
+
+        We still return bundles/items for debugging, but AgentResult.success is
+        False unless at least one EvidenceItem succeeded.
+        """
+        result = super().run(ctx, prompt_spec, tool_plan)
+        try:
+            bundle, _log = result.output  # type: ignore[misc]
+            if getattr(bundle, "total_sources_succeeded", 0) <= 0:
+                result.success = False
+                result.error = result.error or "No successful evidence collected"
+        except Exception:
+            pass
+        return result
 
     # ------------------------------------------------------------------
     # Serper URL discovery
@@ -410,7 +435,7 @@ class CollectorSitePinned(CollectorOpenSearch):
                     continue
 
                 data = response.json()
-                organic = data.get("organic", [])
+                organic = data.get("organic") or []
 
                 for result in organic:
                     url = result.get("link", "")
@@ -499,6 +524,27 @@ class CollectorSitePinned(CollectorOpenSearch):
                 f"[SourcePinned] {extractor.source_id} extraction failed: {e}"
             )
             return None
+
+        # If extractor returned a deterministic numeric stat, resolve
+        # without another LLM call.
+        if extractor.source_id == "hltv" and ext_metadata.get("awp_kills") is not None:
+            awp_kills = ext_metadata.get("awp_kills")
+            outcome = "Yes" if int(awp_kills) > 0 else "No"
+            reason = (
+                f"HLTV weapon stats show AWP kills/frags = {awp_kills} "
+                f"on {match_url}."
+            )
+            metadata = {
+                "direct_extraction": True,
+                "resolution_method": "deterministic_structured_data",
+                "extractor_source_id": extractor.source_id,
+                **ext_metadata,
+            }
+            ctx.info(
+                f"[SourcePinned] {extractor.source_id} deterministic resolution SUCCESS: "
+                f"outcome={outcome}, awp_kills={awp_kills}"
+            )
+            return outcome, reason, metadata
 
         # Build LLM prompt (domain-agnostic)
         market = prompt_spec.market
@@ -629,10 +675,45 @@ class CollectorSitePinned(CollectorOpenSearch):
             ), record
 
         try:
-            # --- Phase 1: Serper URL discovery ---
-            discovered_urls = self._serper_discover_urls(
+            # --- Phase 0: Seed discovered URLs with explicit source_targets ---
+            # If the PromptSpec already includes concrete URLs on the required
+            # domain(s), use them directly (no need to discover via Serper).
+            seeded_urls: list[dict[str, str]] = []
+            for target in getattr(requirement, "source_targets", []) or []:
+                uri = getattr(target, "uri", "") or ""
+                if not uri:
+                    continue
+                parsed = urlparse(uri)
+                host = (parsed.netloc or "").lower().lstrip("www.")
+                if not host:
+                    continue
+                if any(rd.get("domain") in host or host in rd.get("domain") for rd in required_domains):
+                    seeded_urls.append({"url": uri, "title": "[source_target]", "snippet": ""})
+
+            # --- Phase 1: Serper URL discovery (optional) ---
+            serper_urls = self._serper_discover_urls(
                 ctx, client, prompt_spec, requirement, required_domains,
             )
+
+            def _is_deep_source_target(u: str) -> bool:
+                try:
+                    p = urlparse(u)
+                    path = (p.path or "")
+                    return any(seg in path for seg in ("/stats/", "/en/matches/", "/matches/")) or bool(p.query)
+                except Exception:
+                    return False
+
+            deep_seeded = [u for u in seeded_urls if _is_deep_source_target(u.get("url", ""))]
+
+            # Prefer Serper discovery for finding the right page, but always
+            # prepend deep explicit source_target URLs (e.g. HLTV stats pages)
+            # since they are often the canonical contract source.
+            discovered_urls: list[dict[str, str]] = []
+            if deep_seeded:
+                discovered_urls.extend(deep_seeded)
+            for u in (serper_urls or seeded_urls):
+                if u.get("url") and all(u["url"] != x.get("url") for x in discovered_urls):
+                    discovered_urls.append(u)
             record.input["discovered_urls"] = [u["url"] for u in discovered_urls]
 
             # --- Phase 1.5: Direct extraction via extractor registry ---
@@ -695,10 +776,9 @@ class CollectorSitePinned(CollectorOpenSearch):
                 ), record
 
             # --- Phase 2: Gemini with UrlContext + GoogleSearch ---
-            strict_prompt = _build_strict_prompt(
-                prompt_spec, requirement, required_domains,
-                discovered_urls=discovered_urls or None,
-            )
+            # We'll rotate which discovered URL(s) are presented first per
+            # attempt to mitigate per-URL blocks/timeouts.
+            strict_prompt_base = None  # built inside loop
 
             best_parsed: dict[str, Any] | None = None
             best_grounding: dict[str, Any] | None = None
@@ -716,15 +796,36 @@ class CollectorSitePinned(CollectorOpenSearch):
                     f"discovered_urls: {len(discovered_urls)})"
                 )
 
+                # Rotate URL subset
+                url_subset = None
+                if discovered_urls:
+                    # 1 URL per attempt (plus any deep seeded URL already prepended)
+                    idx = (attempt - 1) % len(discovered_urls)
+                    url_subset = [discovered_urls[idx]]
+
+                strict_prompt = _build_strict_prompt(
+                    prompt_spec, requirement, required_domains,
+                    discovered_urls=url_subset or (discovered_urls or None),
+                )
+
                 response = self._call_gemini_strict(
                     client, strict_prompt,
-                    discovered_urls=discovered_urls or None,
+                    discovered_urls=url_subset or (discovered_urls or None),
                 )
                 text = self._extract_text(response)
                 grounding = self._extract_grounding(response)
                 url_ctx_meta = self._extract_url_context_metadata(response)
-                parsed = self._parse_json(text)
-                parsed = self._normalize_parsed(parsed)
+
+                try:
+                    parsed = self._parse_json(text)
+                    parsed = self._normalize_parsed(parsed)
+                except Exception as e:
+                    ctx.warning(
+                        f"[SourcePinned] Attempt {attempt}: failed to parse JSON response ({type(e).__name__}: {e}). "
+                        f"text_head={text[:80]!r}"
+                    )
+                    # Still accumulate metadata, then retry next attempt
+                    continue
 
                 # Accumulate metadata across attempts
                 all_grounding_sources.extend(grounding.get("sources", []))
@@ -789,17 +890,24 @@ class CollectorSitePinned(CollectorOpenSearch):
                 merged_grounding, required_domains,
             )
 
-            # If no required-domain sources found, include all sources
-            # for transparency but mark them as non-authoritative
+            # If no required-domain sources were found, keep evidence_sources
+            # empty and rely on data_source_covered=False. This prevents
+            # accidental off-domain resolution.
             if not evidence_sources:
-                evidence_sources = self._build_strict_evidence_sources(
-                    {"sources": all_grounding_sources}, required_domains,
-                )
+                evidence_sources = []
 
             outcome = final_parsed.get("outcome", "")
             reason = final_parsed.get("reason", "")
             combined_text = json.dumps(final_parsed)
-            success = outcome.lower() in ("yes", "no")
+
+            # STRICT POLICY: if the market requires specific domain(s) and we
+            # did not cover them, we must fail closed (no YES/NO).
+            if not best_sources_covered:
+                success = False
+                # clear outcome to avoid downstream treating it as definitive
+                outcome = ""
+            else:
+                success = outcome.lower() in ("yes", "no")
 
             # Deduplicate search queries
             unique_queries = list(dict.fromkeys(all_search_queries))
@@ -830,7 +938,7 @@ class CollectorSitePinned(CollectorOpenSearch):
                 raw_content=reason[:500] if reason else combined_text[:500],
                 parsed_value=outcome,
                 extracted_fields={
-                    "outcome": outcome,
+                    "outcome": outcome or "Invalid",
                     "reason": reason,
                     "evidence_sources": evidence_sources,
                     "grounding_search_queries": unique_queries,
@@ -845,12 +953,19 @@ class CollectorSitePinned(CollectorOpenSearch):
                     "url_context_statuses": all_url_context_statuses,
                 },
                 success=success,
-                error=None if success else f"Unexpected outcome: {outcome!r}",
+                error=None if success else (
+                    "Missing required-domain evidence" if not best_sources_covered
+                    else f"Unexpected outcome: {outcome!r}"
+                ),
             ), record
 
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            ctx.error(f"[SourcePinned] Exception for {req_id}: {tb}")
             record.ended_at = ctx.now().isoformat()
-            record.error = str(e)
+            # Keep error short in artifacts, full traceback in logs
+            record.error = f"{type(e).__name__}: {e}"
 
             return EvidenceItem(
                 evidence_id=evidence_id,
@@ -862,7 +977,7 @@ class CollectorSitePinned(CollectorOpenSearch):
                     fetched_at=ctx.now(),
                 ),
                 success=False,
-                error=f"Gemini grounded strict call failed: {e}",
+                error=f"Gemini grounded strict call failed: {type(e).__name__}: {e}",
             ), record
 
     # ------------------------------------------------------------------
@@ -921,15 +1036,24 @@ class CollectorSitePinned(CollectorOpenSearch):
         find the ``{...}`` block regardless of which part it's in.
         """
         texts: list[str] = []
-        for candidate in getattr(response, "candidates", []):
+        for candidate in getattr(response, "candidates", []) or []:
             content = getattr(candidate, "content", None)
             if content is None:
                 continue
-            for part in getattr(content, "parts", []):
+            for part in (getattr(content, "parts", None) or []):
                 text = getattr(part, "text", None)
                 if text:
                     texts.append(text)
-        return "\n".join(texts)
+        if texts:
+            return "\n".join(texts)
+
+        # Fallback: google-genai sometimes exposes a convenience `.text` field
+        # even when candidate parts are empty.
+        t = getattr(response, "text", None)
+        if isinstance(t, str) and t.strip():
+            return t.strip()
+
+        return ""
 
     @staticmethod
     def _extract_url_context_metadata(response: Any) -> list[dict[str, str]]:
@@ -942,7 +1066,7 @@ class CollectorSitePinned(CollectorOpenSearch):
             meta = getattr(candidate, "url_context_metadata", None)
             if meta is None:
                 continue
-            for url_meta in getattr(meta, "url_metadata", []):
+            for url_meta in (getattr(meta, "url_metadata", None) or []):
                 url = getattr(url_meta, "retrieved_url", "")
                 status_enum = getattr(url_meta, "url_retrieval_status", None)
                 status = "unknown"

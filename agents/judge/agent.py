@@ -92,13 +92,56 @@ class JudgeLLM(BaseAgent):
             evidence_bundles = [evidence_bundles]
 
         ctx.info(f"JudgeLLM reviewing trace {reasoning_trace.trace_id}")
-        
+
+        # If a collector declares required domains but failed to cover them,
+        # we must fail closed to INVALID. This prevents the system from
+        # "resolving" markets using off-domain evidence when the market
+        # contract requires a specific source.
+        for bundle in evidence_bundles:
+            for item in bundle.items:
+                ef = item.extracted_fields or {}
+                required = ef.get("data_source_domains_required")
+                covered = ef.get("data_source_covered")
+                if required and covered is False:
+                    verdict = self.builder.build(
+                        ctx,
+                        prompt_spec,
+                        evidence_bundles,
+                        reasoning_trace,
+                        override_outcome="INVALID",
+                        override_confidence=0.0,
+                        override_rule_id="R_REQUIRED_SOURCE_MISSING",
+                    )
+                    verdict.metadata["required_domains"] = required
+                    verdict.metadata["data_source_covered"] = False
+                    verdict.metadata["reason"] = (
+                        "Required data source domain(s) were not covered by evidence; "
+                        "returning INVALID to avoid off-domain resolution."
+                    )
+                    verification = self._validate_verdict(
+                        verdict, prompt_spec, evidence_bundles, reasoning_trace
+                    )
+                    return AgentResult(
+                        output=verdict,
+                        verification=verification,
+                        receipts=ctx.get_receipt_refs(),
+                        metadata={
+                            "judge": "llm",
+                            "strict_mode": self.strict_mode,
+                            "market_id": verdict.market_id,
+                            "outcome": verdict.outcome,
+                            "confidence": verdict.confidence,
+                            "rule_id": verdict.resolution_rule_id,
+                            "reasoning_valid": True,
+                        },
+                    )
+
         # Check LLM client
         if not ctx.llm:
             return AgentResult.failure(
                 error="LLM client required for LLM judge",
             )
-        
+
         try:
             # Get LLM review
             review = self._get_llm_review(ctx, prompt_spec, evidence_bundles, reasoning_trace)
@@ -376,12 +419,25 @@ class JudgeRuleBased(BaseAgent):
         ctx.info(f"JudgeRuleBased reviewing trace {reasoning_trace.trace_id}")
 
         try:
-            # Apply rule-based review
-            outcome, confidence, rule_id = self._apply_rules(
-                prompt_spec,
-                evidence_bundles,
-                reasoning_trace,
-            )
+            # Fail closed to INVALID when required domains are not covered.
+            for bundle in evidence_bundles:
+                for item in bundle.items:
+                    ef = item.extracted_fields or {}
+                    required = ef.get("data_source_domains_required")
+                    covered = ef.get("data_source_covered")
+                    if required and covered is False:
+                        outcome, confidence, rule_id = ("INVALID", 0.0, "R_REQUIRED_SOURCE_MISSING")
+                        break
+                else:
+                    continue
+                break
+            else:
+                # Apply rule-based review
+                outcome, confidence, rule_id = self._apply_rules(
+                    prompt_spec,
+                    evidence_bundles,
+                    reasoning_trace,
+                )
 
             # Build verdict
             verdict = self.builder.build(
