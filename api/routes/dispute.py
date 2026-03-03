@@ -256,9 +256,24 @@ async def dispute(request: DisputeRequest) -> DisputeResponse:
         task_names = []
         for collector_name in request.collectors:
             try:
-                collector = registry.get_agent_by_name(collector_name, collector_ctx)
+                # Match /step/resolve collector instantiation patterns
+                if collector_name == "CollectorPAN":
+                    from agents.collector.pan_agent import PANCollectorAgent
+                    collector = PANCollectorAgent()
+                elif collector_name == "CollectorOpenSearch":
+                    from agents.collector.gemini_grounded_agent import CollectorOpenSearch
+                    collector = CollectorOpenSearch()
+                elif collector_name == "CollectorSitePinned":
+                    from agents.collector.source_pinned_agent import CollectorSitePinned
+                    collector = CollectorSitePinned()
+                elif collector_name == "CollectorCRP":
+                    from agents.collector.crp_agent import CollectorCRP
+                    collector = CollectorCRP()
+                else:
+                    collector = registry.get_agent_by_name(collector_name, collector_ctx)
             except Exception as e:
                 raise InvalidRequestError(f"Collector not found: {collector_name} ({e})")
+
             tasks.append(asyncio.to_thread(collector.run, collector_ctx, prompt_spec, tool_plan))
             task_names.append(collector.name)
 
