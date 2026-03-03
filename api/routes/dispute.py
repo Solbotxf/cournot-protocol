@@ -65,17 +65,23 @@ class DisputeTarget(BaseModel):
 
 
 class DisputePatch(BaseModel):
-    """Optional patch operations.
+    """Optional patch/override operations.
 
-    For MVP, we support appending evidence items.
+    MVP supports:
 
     - evidence_items_append: list of EvidenceItem JSON objects to append to the
       provided evidence_bundle.items before rerun.
 
-    Frontend may also send other fields for display; unknown keys are ignored.
+    - prompt_spec_override: partial PromptSpec JSON to deep-merge into the
+      provided prompt_spec before rerun (stateless).
+
+    Merge strategy:
+    - dicts: deep-merge
+    - lists: replace wholesale (frontend should include any items it wants to keep)
     """
 
     evidence_items_append: list[dict[str, Any]] | None = None
+    prompt_spec_override: dict[str, Any] | None = None
 
 
 class DisputeRequest(BaseModel):
@@ -138,6 +144,30 @@ def _normalize_patch(patch: DisputePatch | dict[str, Any] | None) -> DisputePatc
     return None
 
 
+def _deep_merge(base: Any, override: Any) -> Any:
+    """Deep merge override onto base.
+
+    - dict: recurse
+    - list: replace (return override)
+    - scalar/other: replace
+
+    This keeps behavior predictable and makes overrides explicit.
+    """
+    if override is None:
+        return base
+
+    if isinstance(base, dict) and isinstance(override, dict):
+        out = dict(base)
+        for k, v in override.items():
+            out[k] = _deep_merge(out.get(k), v)
+        return out
+
+    if isinstance(override, list):
+        return override
+
+    return override
+
+
 # -----------------------------
 # Route
 # -----------------------------
@@ -158,14 +188,19 @@ async def dispute(request: DisputeRequest) -> DisputeResponse:
         from core.schemas.evidence import EvidenceBundle, EvidenceItem
         from core.schemas.reasoning import ReasoningTrace
 
-        prompt_spec = PromptSpec(**request.prompt_spec)
+        # Apply patch operations (prompt_spec override + evidence append)
+        normalized_patch = _normalize_patch(request.patch)
+
+        merged_prompt_spec_dict = request.prompt_spec
+        if normalized_patch and normalized_patch.prompt_spec_override:
+            merged_prompt_spec_dict = _deep_merge(request.prompt_spec, normalized_patch.prompt_spec_override)
+
+        prompt_spec = PromptSpec(**merged_prompt_spec_dict)
         evidence_bundle = EvidenceBundle(**request.evidence_bundle)
         reasoning_trace = (
             ReasoningTrace(**request.reasoning_trace) if request.reasoning_trace else None
         )
 
-        # Apply patch operations (MVP: append evidence items)
-        normalized_patch = _normalize_patch(request.patch)
         if normalized_patch and normalized_patch.evidence_items_append:
             for raw_item in normalized_patch.evidence_items_append:
                 evidence_bundle.items.append(EvidenceItem(**raw_item))
