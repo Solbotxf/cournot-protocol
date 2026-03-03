@@ -85,9 +85,9 @@ class DisputePatch(BaseModel):
 
 
 class DisputeRequest(BaseModel):
-    mode: Literal["reasoning_only"] = Field(
+    mode: Literal["reasoning_only", "full_rerun"] = Field(
         default="reasoning_only",
-        description="MVP: only reasoning_only is supported; frontend still sends full context.",
+        description="reasoning_only reruns downstream steps using provided evidence. full_rerun re-collects evidence then reruns.",
     )
 
     # Optional dashboard correlation only (stateless: no lookup)
@@ -100,12 +100,16 @@ class DisputeRequest(BaseModel):
 
     # Full context artifacts (stateless contract)
     prompt_spec: dict[str, Any]
-    evidence_bundle: dict[str, Any]
+    evidence_bundle: dict[str, Any] | None = None
 
     # Optional: if present, allow judge-only rerun
     reasoning_trace: dict[str, Any] | None = None
 
-    # Optional patch operations (e.g., append evidence items)
+    # Optional: required for full_rerun (stateless re-collect)
+    tool_plan: dict[str, Any] | None = None
+    collectors: list[str] | None = None
+
+    # Optional patch operations (e.g., append evidence items, prompt_spec_override)
     patch: DisputePatch | dict[str, Any] | None = None
 
 
@@ -177,8 +181,8 @@ def _deep_merge(base: Any, override: Any) -> Any:
 async def dispute(request: DisputeRequest) -> DisputeResponse:
     """Rerun audit/judge based on a dispute, returning new artifacts."""
 
-    if request.mode != "reasoning_only":
-        raise InvalidRequestError("Only reasoning_only is supported")
+    if request.mode not in ("reasoning_only", "full_rerun"):
+        raise InvalidRequestError("Invalid mode")
 
     rerun_plan = _RERUN_PLAN.get(request.reason_code, ["judge"])
 
@@ -196,12 +200,13 @@ async def dispute(request: DisputeRequest) -> DisputeResponse:
             merged_prompt_spec_dict = _deep_merge(request.prompt_spec, normalized_patch.prompt_spec_override)
 
         prompt_spec = PromptSpec(**merged_prompt_spec_dict)
-        evidence_bundle = EvidenceBundle(**request.evidence_bundle)
+
+        evidence_bundle = EvidenceBundle(**request.evidence_bundle) if request.evidence_bundle is not None else None
         reasoning_trace = (
             ReasoningTrace(**request.reasoning_trace) if request.reasoning_trace else None
         )
 
-        if normalized_patch and normalized_patch.evidence_items_append:
+        if evidence_bundle is not None and normalized_patch and normalized_patch.evidence_items_append:
             for raw_item in normalized_patch.evidence_items_append:
                 evidence_bundle.items.append(EvidenceItem(**raw_item))
 
@@ -220,12 +225,66 @@ async def dispute(request: DisputeRequest) -> DisputeResponse:
     from agents.auditor import get_auditor
     from agents.judge import get_judge
 
-    evidence_bundles = [evidence_bundle]
+    # Evidence bundles for rerun
+    evidence_bundles = [evidence_bundle] if evidence_bundle is not None else []
 
     executed_plan: list[str] = []
 
+    # Optional: full rerun includes evidence collection
+    if request.mode == "full_rerun":
+        if request.tool_plan is None:
+            raise InvalidRequestError("tool_plan is required for mode=full_rerun")
+        if not request.collectors:
+            raise InvalidRequestError("collectors is required for mode=full_rerun")
+
+        try:
+            from core.schemas.transport import ToolPlan
+            from core.schemas.evidence import EvidenceBundle
+            from agents.registry import get_registry
+            from api.deps import build_llm_override
+
+            tool_plan = ToolPlan(**request.tool_plan)
+        except Exception as e:
+            raise InvalidRequestError(f"Invalid tool_plan: {e}")
+
+        registry = get_registry()
+
+        collector_override = build_llm_override(None, None, agent_name="collector")
+        collector_ctx = get_agent_context(with_llm=True, with_http=True, llm_override=collector_override)
+
+        tasks = []
+        task_names = []
+        for collector_name in request.collectors:
+            try:
+                collector = registry.get_agent_by_name(collector_name, collector_ctx)
+            except Exception as e:
+                raise InvalidRequestError(f"Collector not found: {collector_name} ({e})")
+            tasks.append(asyncio.to_thread(collector.run, collector_ctx, prompt_spec, tool_plan))
+            task_names.append(collector.name)
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        evidence_bundles = []
+        for name, result in zip(task_names, results):
+            if isinstance(result, Exception):
+                logger.warning(f"Collector {name} failed: {result}")
+                continue
+            if not getattr(result, "success", False):
+                logger.warning(f"Collector {name} failed: {getattr(result, 'error', None)}")
+                continue
+            bundle, _ = result.output
+            bundle.collector_name = name
+            evidence_bundles.append(bundle)
+
+        if not evidence_bundles:
+            raise InvalidRequestError("No evidence collected in full_rerun")
+
+        executed_plan.append("collect")
+
     # Audit (if requested or if reasoning_trace missing)
     if "audit" in rerun_plan or reasoning_trace is None:
+        if not evidence_bundles:
+            raise InvalidRequestError("evidence_bundle is required for reasoning_only, or enable full_rerun")
         auditor = get_auditor(ctx)
         audit_result = await asyncio.to_thread(auditor.run, ctx, prompt_spec, evidence_bundles)
         if not audit_result.success:
@@ -241,9 +300,14 @@ async def dispute(request: DisputeRequest) -> DisputeResponse:
     verdict = judge_result.output
     executed_plan.append("judge")
 
+    primary_bundle = evidence_bundles[0] if evidence_bundles else None
+
     artifacts = {
         "prompt_spec": prompt_spec.model_dump(mode="json"),
-        "evidence_bundle": evidence_bundle.model_dump(mode="json"),
+        # Back-compat: include a single primary bundle
+        "evidence_bundle": primary_bundle.model_dump(mode="json") if primary_bundle else None,
+        # Preferred: include all bundles
+        "evidence_bundles": [b.model_dump(mode="json") for b in evidence_bundles],
         "reasoning_trace": reasoning_trace.model_dump(mode="json"),
         "verdict": verdict.model_dump(mode="json"),
     }
