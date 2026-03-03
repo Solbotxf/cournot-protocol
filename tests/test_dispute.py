@@ -303,3 +303,67 @@ class TestDiffSummary:
         assert diff.verdict_changed is False
         assert diff.confidence_before == 0.9
         assert diff.confidence_after == 0.7
+
+
+# --- HTTP-level tests ---
+
+class TestDisputeHTTP:
+    def test_endpoint_exists(self):
+        """Route should be registered — empty body gives 422 not 404."""
+        from fastapi.testclient import TestClient
+        from api.app import app
+        client = TestClient(app)
+        resp = client.post("/dispute", json={})
+        assert resp.status_code == 422
+
+    def test_400_on_invalid_mode_target(self):
+        """reasoning_only + collect should be rejected with 400."""
+        from fastapi.testclient import TestClient
+        from api.app import app
+        client = TestClient(app)
+        resp = client.post("/dispute", json={
+            "mode": "reasoning_only",
+            "target": {"step": "collect"},
+            "reason_code": "EVIDENCE_MISSING",
+            "message": "missing evidence",
+            "context": {
+                "prompt_spec": {},
+                "evidence_bundle": [{}],
+            },
+        })
+        assert resp.status_code == 400
+
+    def test_400_on_disallowed_patch(self):
+        """Patch with disallowed keys should be rejected with 400."""
+        from fastapi.testclient import TestClient
+        from api.app import app
+        client = TestClient(app)
+        resp = client.post("/dispute", json={
+            "mode": "reasoning_only",
+            "target": {"step": "audit"},
+            "reason_code": "REASONING_STEP_INCORRECT",
+            "message": "bad reasoning",
+            "patch": {"source_targets": ["new"]},
+            "context": {
+                "prompt_spec": {},
+                "evidence_bundle": [{}],
+            },
+        })
+        assert resp.status_code == 400
+
+    def test_400_on_judge_without_reasoning_trace(self):
+        """Judge target without reasoning_trace in context should 400."""
+        from fastapi.testclient import TestClient
+        from api.app import app
+        client = TestClient(app)
+        resp = client.post("/dispute", json={
+            "mode": "reasoning_only",
+            "target": {"step": "judge"},
+            "reason_code": "VERDICT_WRONG_MAPPING",
+            "message": "wrong verdict",
+            "context": {
+                "prompt_spec": {},
+                "evidence_bundle": [{}],
+            },
+        })
+        assert resp.status_code == 400
