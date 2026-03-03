@@ -125,6 +125,12 @@ class LLMReasoner:
             {"role": "user", "content": user_prompt},
         ]
 
+        # Inject dispute context if present (dispute-driven rerun)
+        dispute_ctx = ctx.extra.get("dispute_context")
+        if dispute_ctx:
+            dispute_block = self._build_dispute_prompt(dispute_ctx)
+            messages.append({"role": "user", "content": dispute_block})
+
         # Secondary truncation: if estimated tokens exceed target, reduce evidence and rebuild
         while self._estimate_tokens(messages) > target_tokens and max_chars > 2000:
             max_chars = max(2000, max_chars // 2)
@@ -177,6 +183,29 @@ class LLMReasoner:
         
         raise ValueError(f"Failed to generate reasoning trace after {self.MAX_RETRIES + 1} attempts: {last_error}")
     
+    def _build_dispute_prompt(self, dispute_ctx: dict[str, Any]) -> str:
+        """Build a dispute injection block for the LLM messages."""
+        parts = [
+            "## DISPUTE CONTEXT — This is a dispute-driven rerun.",
+            "",
+            f"Reason code: {dispute_ctx['reason_code']}",
+            f"Disputant message: {dispute_ctx['message']}",
+        ]
+        if dispute_ctx.get("leaf_path"):
+            parts.append(f"Disputed artifact path: {dispute_ctx['leaf_path']}")
+        if dispute_ctx.get("patch"):
+            parts.append(f"Patch applied: {json.dumps(dispute_ctx['patch'], indent=2)}")
+        parts.extend([
+            "",
+            "INSTRUCTIONS:",
+            "1. Evaluate the dispute point FIRST before proceeding with normal analysis.",
+            "2. Explicitly state whether you agree or disagree with the dispute claim.",
+            "3. If the dispute reveals a genuine issue, adjust your reasoning accordingly.",
+            "4. If the dispute is unfounded, explain why your original reasoning holds.",
+            "5. In your reasoning_summary, include a section addressing the dispute.",
+        ])
+        return "\n".join(parts)
+
     def _prepare_evidence_json(
         self,
         bundles: list[EvidenceBundle],
