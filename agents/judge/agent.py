@@ -270,10 +270,18 @@ class JudgeLLM(BaseAgent):
             [
                 "",
                 "INSTRUCTIONS:",
-                "1) Evaluate the dispute point FIRST.",
-                "2) Explicitly state whether you agree or disagree with the dispute claim.",
-                "3) If needed, revise the final verdict and confidence.",
-                "4) In final_justification, include a short section addressing the dispute.",
+                "1) The Auditor has ALREADY evaluated this dispute and produced the",
+                "   reasoning trace above. Your job is to review the Auditor's handling",
+                "   of the dispute, NOT to re-evaluate the dispute claim independently.",
+                "2) If the Auditor's reasoning trace correctly addressed the dispute",
+                "   (weighed the evidence, resolved conflicts, reached a sound conclusion),",
+                "   you MUST trust the Auditor's preliminary outcome — even if the",
+                "   disputant's claim sounds compelling on its surface.",
+                "3) Only revise the verdict if the Auditor's reasoning is logically flawed",
+                "   or failed to consider the dispute evidence. A disputant's assertion",
+                "   alone is NOT grounds to override the Auditor.",
+                "4) Explicitly state whether the Auditor handled the dispute correctly.",
+                "5) In final_justification, include a short section addressing the dispute.",
             ]
         )
         return "\n".join(parts)
