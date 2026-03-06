@@ -45,6 +45,32 @@ if TYPE_CHECKING:
 # Prompt template
 # ---------------------------------------------------------------------------
 
+SOURCE_ANALYSIS_PROMPT = """\
+Given the following evidence verdict and grounding sources, analyze each source.
+
+### VERDICT
+Outcome: {outcome}
+Reason: {reason}
+
+### GROUNDING SOURCES
+{sources_text}
+
+For each source, determine:
+1. key_fact: The specific fact this source contributes to the verdict (1-2 sentences)
+2. supports: Does this source support the verdict? "YES", "NO", or "N/A"
+3. credibility_tier: Integer 1-3 based on the source's authority:
+   - 1 = authoritative primary source (government, official body, major wire service, domain-expert think tank like Brookings/CFR, top-tier newspaper of record like NYT/WSJ/BBC)
+   - 2 = reputable mainstream source (well-known news outlet, established media, Wikipedia)
+   - 3 = low-confidence source (blog, forum, opinion site, unknown outlet, social media)
+
+Return JSON:
+{{"sources": [
+    {{"source_id": "[1]", "key_fact": "...", "supports": "YES|NO|N/A", "credibility_tier": 1}},
+    ...
+]}}
+"""
+
+
 GEMINI_GROUNDED_SYSTEM_PROMPT = """\
 You are an AI Oracle resolver for a prediction market resolution engine.
 
@@ -93,19 +119,41 @@ def _extract_required_domains(requirement: "DataRequirement") -> list[dict[str, 
     return results
 
 
+def _source_matches_domain(src: dict[str, str], domain: str) -> bool:
+    """Check if a grounding source matches a required domain.
+
+    Checks both the URI host *and* the title, because Gemini may return
+    opaque Vertex AI redirect URLs whose host is ``vertexaisearch.cloud.google.com``
+    while the title still carries the real site name (e.g. "FotMob - Match Stats").
+
+    For title matching, the domain root is extracted by stripping the TLD
+    (e.g. ``fotmob.com`` → ``fotmob``) so that "FotMob - Match Stats" matches.
+    """
+    uri = src.get("uri", "")
+    parsed = urlparse(uri)
+    host = (parsed.netloc or "").lower().lstrip("www.")
+    if domain in host or host in domain:
+        return True
+    title = src.get("title", "").lower()
+    if not title:
+        return False
+    # Strip TLD to get the domain root (e.g. "fotmob.com" → "fotmob")
+    domain_root = domain.rsplit(".", 1)[0] if "." in domain else domain
+    if domain_root in title:
+        return True
+    return False
+
+
 def _sources_cover_domains(
     grounding_sources: list[dict[str, str]],
     required_domains: list[dict[str, str]],
 ) -> bool:
-    """Check if any grounding source URIs match any of the required domains."""
+    """Check if any grounding source URIs/titles match any of the required domains."""
     if not required_domains:
         return True  # nothing required — trivially covered
     for src in grounding_sources:
-        uri = src.get("uri", "")
-        parsed = urlparse(uri)
-        host = (parsed.netloc or "").lower().lstrip("www.")
         for req in required_domains:
-            if req["domain"] in host or host in req["domain"]:
+            if _source_matches_domain(src, req["domain"]):
                 return True
     return False
 
@@ -425,6 +473,13 @@ class CollectorOpenSearch(BaseAgent):
 
             outcome = final_parsed.get("outcome", "")
             reason = final_parsed.get("reason", "")
+
+            # Enrich with per-source analysis if LLM is available
+            if ctx.llm and evidence_sources:
+                evidence_sources = self._analyze_sources(
+                    ctx, outcome, reason, evidence_sources,
+                )
+
             combined_text = json.dumps(final_parsed)
             success = outcome.lower() in ("yes", "no")
 
@@ -548,22 +603,84 @@ class CollectorOpenSearch(BaseAgent):
         """Build evidence source dicts from grounding, marking data-source matches as tier 1."""
         req_domain_set = {d["domain"] for d in required_domains}
         evidence_sources: list[dict[str, Any]] = []
-        for src in grounding.get("sources", []):
+        for i, src in enumerate(grounding.get("sources", [])):
             uri = src.get("uri", "")
             parsed = urlparse(uri)
             host = (parsed.netloc or "").lower().lstrip("www.")
             is_required = any(
-                rd in host or host in rd for rd in req_domain_set
+                _source_matches_domain(src, rd) for rd in req_domain_set
             )
             evidence_sources.append({
                 "url": uri,
-                "source_id": src.get("title", "")[:50],
+                "source_id": f"[{i + 1}]",
+                "domain_name": src.get("title", "") or host or None,
                 "credibility_tier": 1 if is_required else 2,
                 "key_fact": src.get("title", ""),
                 "supports": "N/A",
                 "date_published": None,
                 "is_required_data_source": is_required,
             })
+        return evidence_sources
+
+    @staticmethod
+    def _analyze_sources(
+        ctx: "AgentContext",
+        outcome: str,
+        reason: str,
+        evidence_sources: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Enrich evidence sources with per-source key_fact and supports via LLM.
+
+        Calls ctx.llm.chat() with the verdict + grounding sources to produce
+        a per-source analysis.  Falls back to the original title-based values
+        on any failure so current behaviour is preserved.
+        """
+        # Format numbered source list for the prompt
+        lines: list[str] = []
+        for i, src in enumerate(evidence_sources):
+            domain = src.get("domain_name", "") or src.get("key_fact", "")
+            lines.append(f"[{i + 1}] {domain}  (url: {src.get('url', '')})")
+        sources_text = "\n".join(lines)
+
+        prompt = SOURCE_ANALYSIS_PROMPT.format(
+            outcome=outcome,
+            reason=reason,
+            sources_text=sources_text,
+        )
+
+        try:
+            resp = ctx.llm.chat(
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.content.strip()
+            # Strip markdown fences if present
+            fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+            if fence_match:
+                text = fence_match.group(1).strip()
+            parsed = json.loads(text)
+
+            analyzed = parsed.get("sources", [])
+            # Merge analysis back into evidence_sources by index
+            for i, src in enumerate(evidence_sources):
+                if i < len(analyzed):
+                    a = analyzed[i]
+                    if a.get("key_fact"):
+                        src["key_fact"] = str(a["key_fact"])[:300]
+                    supports = str(a.get("supports", "N/A")).upper()
+                    if supports in ("YES", "NO", "N/A"):
+                        src["supports"] = supports
+                    raw_tier = a.get("credibility_tier")
+                    if raw_tier is not None:
+                        try:
+                            tier = int(raw_tier)
+                            if tier in (1, 2, 3):
+                                src["credibility_tier"] = tier
+                        except (ValueError, TypeError):
+                            pass  # keep existing tier
+        except Exception:
+            # Graceful fallback — keep the title-based values from _build_evidence_sources
+            pass
+
         return evidence_sources
 
     @staticmethod

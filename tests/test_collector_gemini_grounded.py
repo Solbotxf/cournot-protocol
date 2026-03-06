@@ -7,6 +7,7 @@ and EvidenceItem output without requiring a real Google API key.
 """
 
 import json
+import re
 import pytest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -14,9 +15,11 @@ from unittest.mock import MagicMock, patch
 from agents.context import AgentContext
 from agents.collector.gemini_grounded_agent import (
     CollectorOpenSearch,
+    SOURCE_ANALYSIS_PROMPT,
     _build_user_prompt,
     _build_targeted_source_prompt,
     _extract_required_domains,
+    _source_matches_domain,
     _sources_cover_domains,
 )
 from core.schemas import (
@@ -488,6 +491,52 @@ class TestSourcesCoverDomains:
         required = [{"domain": "fotmob.com"}]
         assert _sources_cover_domains(sources, required) is True
 
+    def test_vertex_redirect_matched_by_title(self):
+        """Vertex AI redirect URLs should match via grounding title."""
+        sources = [{
+            "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc123",
+            "title": "FotMob - Real Madrid vs Osasuna",
+        }]
+        required = [{"domain": "fotmob.com"}]
+        assert _sources_cover_domains(sources, required) is True
+
+    def test_vertex_redirect_no_match_when_title_differs(self):
+        sources = [{
+            "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc123",
+            "title": "ESPN - La Liga Results",
+        }]
+        required = [{"domain": "fotmob.com"}]
+        assert _sources_cover_domains(sources, required) is False
+
+
+class TestSourceMatchesDomain:
+    """Test the per-source domain matching helper."""
+
+    def test_matches_host(self):
+        src = {"uri": "https://www.fotmob.com/matches/123", "title": "Some page"}
+        assert _source_matches_domain(src, "fotmob.com") is True
+
+    def test_matches_title(self):
+        src = {
+            "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/xyz",
+            "title": "FotMob - Match Stats",
+        }
+        assert _source_matches_domain(src, "fotmob.com") is True
+
+    def test_no_match(self):
+        src = {
+            "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/xyz",
+            "title": "ESPN - Scores",
+        }
+        assert _source_matches_domain(src, "fotmob.com") is False
+
+    def test_title_match_case_insensitive(self):
+        src = {
+            "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/xyz",
+            "title": "FOTMOB Live Scores",
+        }
+        assert _source_matches_domain(src, "fotmob.com") is True
+
 
 # ---------------------------------------------------------------------------
 # Tests: Prompt includes data-source hints
@@ -607,6 +656,7 @@ class TestTwoPassCollection:
         pass1_resp = _mock_gemini_response_with_source(
             outcome="Yes", reason="6 shots found",
             source_uri="https://flashscore.com/match/123",
+            source_title="Flashscore - Live Scores",
         )
 
         agent = CollectorOpenSearch()
@@ -737,3 +787,232 @@ class TestBuildEvidenceSources:
         assert sources[0]["is_required_data_source"] is True
         assert sources[1]["credibility_tier"] == 2
         assert sources[1]["is_required_data_source"] is False
+
+    def test_source_id_is_citation_ref(self):
+        """source_id should be '[N]' pattern, not page title."""
+        grounding = {
+            "sources": [
+                {"uri": "https://www.fotmob.com/matches/123", "title": "FotMob Match Stats"},
+                {"uri": "https://flashscore.com/match/456", "title": "Flashscore Live"},
+            ],
+        }
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, [])
+        assert sources[0]["source_id"] == "[1]"
+        assert sources[1]["source_id"] == "[2]"
+
+    def test_domain_name_from_title(self):
+        """domain_name should carry the grounding title for display."""
+        grounding = {
+            "sources": [
+                {"uri": "https://vertexaisearch.cloud.google.com/redirect/abc", "title": "ESPN - NBA Scores"},
+                {"uri": "https://www.fotmob.com/matches/123", "title": "FotMob Match Stats"},
+            ],
+        }
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, [])
+        assert sources[0]["domain_name"] == "ESPN - NBA Scores"
+        assert sources[1]["domain_name"] == "FotMob Match Stats"
+
+    def test_domain_name_falls_back_to_host(self):
+        """When title is empty, domain_name should fall back to the host."""
+        grounding = {
+            "sources": [
+                {"uri": "https://www.fotmob.com/matches/123", "title": ""},
+            ],
+        }
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, [])
+        assert sources[0]["domain_name"] == "fotmob.com"
+
+    def test_vertex_redirect_gets_tier1_via_title(self):
+        """Vertex AI redirect URLs should get tier 1 when title matches required domain."""
+        grounding = {
+            "sources": [
+                {
+                    "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/abc",
+                    "title": "FotMob - Real Madrid vs Osasuna",
+                },
+                {
+                    "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/def",
+                    "title": "ESPN - La Liga Results",
+                },
+            ],
+        }
+        required = [{"domain": "fotmob.com"}]
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, required)
+        assert sources[0]["credibility_tier"] == 1
+        assert sources[0]["is_required_data_source"] is True
+        assert sources[1]["credibility_tier"] == 2
+        assert sources[1]["is_required_data_source"] is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: Evidence source consistency (key_fact, supports, source_id)
+# ---------------------------------------------------------------------------
+
+class TestEvidenceSourceConsistency:
+    """OpenSearch evidence_sources should have descriptive key_fact, proper supports, and citation-ref source_id."""
+
+    def _run_with_llm_mock(self, llm_analysis_response: str):
+        """Run collector with both Gemini and LLM mocked."""
+        gemini_resp = _mock_gemini_response_with_source(
+            outcome="Yes",
+            reason="Real Madrid recorded 8 shots outside the box against Osasuna.",
+            source_uri="https://www.fotmob.com/matches/real-madrid-vs-osasuna",
+            source_title="FotMob - Real Madrid vs Osasuna",
+        )
+
+        mock_llm = MagicMock()
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = llm_analysis_response
+        mock_llm.chat.return_value = mock_llm_response
+
+        agent = CollectorOpenSearch()
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
+             patch.object(agent, "_get_client", return_value=MagicMock()), \
+             patch.object(agent, "_call_gemini", return_value=gemini_resp):
+            ctx = AgentContext.create_minimal()
+            ctx.llm = mock_llm
+            result = agent.run(ctx, _create_spec_with_source_targets(), _create_tool_plan_with_sources())
+
+        return result, mock_llm
+
+    def test_evidence_sources_have_descriptive_key_fact(self):
+        """key_fact should contain a descriptive fact, not just the page title."""
+        analysis_json = json.dumps({"sources": [
+            {
+                "source_id": "[1]",
+                "key_fact": "FotMob match page shows Real Madrid had 8 shots outside the box.",
+                "supports": "YES",
+            },
+        ]})
+        result, _ = self._run_with_llm_mock(analysis_json)
+
+        item = result.output[0].items[0]
+        sources = item.extracted_fields["evidence_sources"]
+        assert len(sources) >= 1
+        # key_fact should NOT be just the page title
+        assert sources[0]["key_fact"] != "FotMob - Real Madrid vs Osasuna"
+        assert "shots" in sources[0]["key_fact"].lower() or "8" in sources[0]["key_fact"]
+
+    def test_evidence_sources_have_proper_supports(self):
+        """supports should be 'YES' or 'NO', not always 'N/A'."""
+        analysis_json = json.dumps({"sources": [
+            {
+                "source_id": "[1]",
+                "key_fact": "FotMob confirms 8 shots outside box.",
+                "supports": "YES",
+            },
+        ]})
+        result, _ = self._run_with_llm_mock(analysis_json)
+
+        item = result.output[0].items[0]
+        sources = item.extracted_fields["evidence_sources"]
+        assert sources[0]["supports"] in ("YES", "NO", "N/A")
+        assert sources[0]["supports"] == "YES"
+
+    def test_evidence_sources_have_citation_ref_source_id(self):
+        """source_id should be '[N]' pattern, not a page title."""
+        analysis_json = json.dumps({"sources": [
+            {
+                "source_id": "[1]",
+                "key_fact": "Match data from FotMob.",
+                "supports": "YES",
+            },
+        ]})
+        result, _ = self._run_with_llm_mock(analysis_json)
+
+        item = result.output[0].items[0]
+        sources = item.extracted_fields["evidence_sources"]
+        assert re.match(r"^\[\d+\]$", sources[0]["source_id"])
+
+    def test_credibility_tier_enriched_by_llm(self):
+        """credibility_tier should vary based on LLM analysis, not always be 2."""
+        analysis_json = json.dumps({"sources": [
+            {
+                "source_id": "[1]",
+                "key_fact": "FotMob match page shows 8 shots.",
+                "supports": "YES",
+                "credibility_tier": 1,
+            },
+        ]})
+        result, _ = self._run_with_llm_mock(analysis_json)
+
+        item = result.output[0].items[0]
+        sources = item.extracted_fields["evidence_sources"]
+        assert sources[0]["credibility_tier"] == 1
+
+    def test_credibility_tier_invalid_kept_as_default(self):
+        """Invalid credibility_tier from LLM should be ignored."""
+        analysis_json = json.dumps({"sources": [
+            {
+                "source_id": "[1]",
+                "key_fact": "Some fact.",
+                "supports": "YES",
+                "credibility_tier": 5,
+            },
+        ]})
+        result, _ = self._run_with_llm_mock(analysis_json)
+
+        item = result.output[0].items[0]
+        sources = item.extracted_fields["evidence_sources"]
+        # Should keep the default (1 for required domain match in this fixture)
+        assert sources[0]["credibility_tier"] in (1, 2)
+
+    def test_analyze_sources_calls_llm(self):
+        """_analyze_sources should call ctx.llm.chat()."""
+        analysis_json = json.dumps({"sources": [
+            {"source_id": "[1]", "key_fact": "Some fact.", "supports": "YES"},
+        ]})
+        result, mock_llm = self._run_with_llm_mock(analysis_json)
+        mock_llm.chat.assert_called_once()
+
+    def test_analyze_sources_falls_back_on_llm_error(self):
+        """If LLM fails, evidence sources should retain title-based key_fact."""
+        gemini_resp = _mock_gemini_response_with_source(
+            outcome="Yes",
+            reason="8 shots found.",
+            source_uri="https://www.fotmob.com/matches/123",
+            source_title="FotMob Match Stats",
+        )
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = RuntimeError("LLM call failed")
+
+        agent = CollectorOpenSearch()
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
+             patch.object(agent, "_get_client", return_value=MagicMock()), \
+             patch.object(agent, "_call_gemini", return_value=gemini_resp):
+            ctx = AgentContext.create_minimal()
+            ctx.llm = mock_llm
+            result = agent.run(ctx, _create_spec_with_source_targets(), _create_tool_plan_with_sources())
+
+        # Should still succeed with fallback values
+        assert result.success
+        item = result.output[0].items[0]
+        sources = item.extracted_fields["evidence_sources"]
+        assert len(sources) == 1
+        # Falls back to title-based key_fact
+        assert sources[0]["key_fact"] == "FotMob Match Stats"
+
+    def test_no_llm_skips_analysis(self):
+        """When ctx.llm is None, evidence sources keep initial values."""
+        gemini_resp = _mock_gemini_response_with_source(
+            outcome="Yes",
+            reason="8 shots found.",
+            source_uri="https://www.fotmob.com/matches/123",
+            source_title="FotMob Match Stats",
+        )
+
+        agent = CollectorOpenSearch()
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "fake-key"}), \
+             patch.object(agent, "_get_client", return_value=MagicMock()), \
+             patch.object(agent, "_call_gemini", return_value=gemini_resp):
+            ctx = AgentContext.create_minimal()
+            # ctx.llm is None by default
+            result = agent.run(ctx, _create_spec_with_source_targets(), _create_tool_plan_with_sources())
+
+        assert result.success
+        item = result.output[0].items[0]
+        sources = item.extracted_fields["evidence_sources"]
+        # Without LLM, keeps title-based key_fact and N/A supports
+        assert sources[0]["key_fact"] == "FotMob Match Stats"
+        assert sources[0]["supports"] == "N/A"

@@ -45,6 +45,11 @@ class EvidenceSource(BaseModel):
         default="N/A",
         description="Whether this source supports resolution: YES, NO, or N/A",
     )
+    domain_name: str | None = Field(
+        default=None,
+        description="Human-readable source name or domain (e.g. 'ESPN - NBA Scores'). "
+                    "Useful when url is an opaque redirect.",
+    )
     date_published: str | None = Field(default=None, description="Publication date (YYYY-MM-DD)")
 
 
