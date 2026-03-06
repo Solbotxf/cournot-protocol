@@ -982,9 +982,17 @@ class CollectorSitePinned(CollectorOpenSearch):
     ) -> list[dict[str, Any]]:
         """Build evidence sources, only including required-domain matches."""
         req_domain_set = {d["domain"] for d in required_domains}
+
+        # Build per-chunk text attribution from grounding_supports
+        chunk_texts: dict[int, list[str]] = {}
+        for sup in grounding.get("supports", []):
+            text = sup.get("text", "")
+            for idx in sup.get("chunk_indices", []):
+                chunk_texts.setdefault(idx, []).append(text)
+
         evidence_sources: list[dict[str, Any]] = []
         seen_uris: set[str] = set()
-        for src in grounding.get("sources", []):
+        for i, src in enumerate(grounding.get("sources", [])):
             uri = src.get("uri", "")
             if uri in seen_uris:
                 continue
@@ -995,11 +1003,16 @@ class CollectorSitePinned(CollectorOpenSearch):
             is_required = any(
                 rd in host or host in rd for rd in req_domain_set
             )
+
+            # Use real grounding text if available, fall back to title
+            attributed_texts = chunk_texts.get(i, [])
+            key_fact = " ".join(attributed_texts)[:500] if attributed_texts else src.get("title", "")
+
             evidence_sources.append({
                 "url": uri,
                 "source_id": src.get("title", "")[:50],
                 "credibility_tier": 1 if is_required else 3,
-                "key_fact": src.get("title", ""),
+                "key_fact": key_fact,
                 "supports": "N/A",
                 "date_published": None,
                 "is_required_data_source": is_required,

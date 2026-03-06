@@ -93,7 +93,11 @@ def create_test_tool_plan() -> ToolPlan:
     )
 
 
-def _mock_gemini_response(outcome: str = "Yes", reason: str = "Evidence found."):
+def _mock_gemini_response(
+    outcome: str = "Yes",
+    reason: str = "Evidence found.",
+    grounding_supports=None,
+):
     """Build a mock Gemini response object with grounding metadata."""
     # Mock the grounding web chunk
     web = MagicMock()
@@ -106,6 +110,7 @@ def _mock_gemini_response(outcome: str = "Yes", reason: str = "Evidence found.")
     grounding_metadata = MagicMock()
     grounding_metadata.web_search_queries = ["Valve Premier Season 4 launch date 2026"]
     grounding_metadata.grounding_chunks = [chunk]
+    grounding_metadata.grounding_supports = grounding_supports
 
     # Mock part with text
     part = MagicMock()
@@ -391,6 +396,7 @@ def _mock_gemini_response_with_source(
     reason: str = "8 shots found.",
     source_uri: str = "https://www.fotmob.com/matches/real-madrid-vs-osasuna",
     source_title: str = "FotMob - Real Madrid vs Osasuna",
+    grounding_supports=None,
 ):
     """Build a mock Gemini response with a specific source URI."""
     web = MagicMock()
@@ -403,6 +409,7 @@ def _mock_gemini_response_with_source(
     grounding_metadata = MagicMock()
     grounding_metadata.web_search_queries = ["Real Madrid Osasuna shots outside box"]
     grounding_metadata.grounding_chunks = [chunk]
+    grounding_metadata.grounding_supports = grounding_supports
 
     part = MagicMock()
     part.text = json.dumps({"outcome": outcome, "reason": reason})
@@ -1016,3 +1023,206 @@ class TestEvidenceSourceConsistency:
         # Without LLM, keeps title-based key_fact and N/A supports
         assert sources[0]["key_fact"] == "FotMob Match Stats"
         assert sources[0]["supports"] == "N/A"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for grounding_supports mocking
+# ---------------------------------------------------------------------------
+
+def _make_mock_support(text: str, chunk_indices: list[int], confidence_scores: list[float] | None = None):
+    """Build a mock grounding_support entry."""
+    sup = MagicMock()
+    seg = MagicMock()
+    seg.text = text
+    sup.segment = seg
+    sup.grounding_chunk_indices = chunk_indices
+    sup.confidence_scores = confidence_scores or []
+    return sup
+
+
+# ---------------------------------------------------------------------------
+# Tests: Grounding supports extraction
+# ---------------------------------------------------------------------------
+
+class TestGroundingSupportExtraction:
+    """Test extraction of grounding_supports from Gemini responses."""
+
+    def test_extract_supports_text(self):
+        """grounding_supports text segments should be extracted."""
+        supports = [
+            _make_mock_support(
+                "Premier Season 4 launched on January 20, 2026.",
+                chunk_indices=[0],
+                confidence_scores=[0.95],
+            ),
+        ]
+        resp = _mock_gemini_response(grounding_supports=supports)
+        grounding = CollectorOpenSearch._extract_grounding(resp)
+        assert len(grounding["supports"]) == 1
+        assert grounding["supports"][0]["text"] == "Premier Season 4 launched on January 20, 2026."
+        assert grounding["supports"][0]["chunk_indices"] == [0]
+        assert grounding["supports"][0]["confidence_scores"] == [0.95]
+
+    def test_extract_multiple_supports(self):
+        """Multiple grounding_supports should all be extracted."""
+        supports = [
+            _make_mock_support("Fact one.", chunk_indices=[0]),
+            _make_mock_support("Fact two.", chunk_indices=[0]),
+        ]
+        resp = _mock_gemini_response(grounding_supports=supports)
+        grounding = CollectorOpenSearch._extract_grounding(resp)
+        assert len(grounding["supports"]) == 2
+
+    def test_extract_empty_when_no_supports(self):
+        """When grounding_supports is None, supports list should be empty."""
+        resp = _mock_gemini_response()  # grounding_supports defaults to None
+        grounding = CollectorOpenSearch._extract_grounding(resp)
+        assert grounding["supports"] == []
+
+    def test_skips_support_with_no_text(self):
+        """Supports with no text segment should be skipped."""
+        sup = MagicMock()
+        sup.segment = None
+        sup.grounding_chunk_indices = [0]
+        sup.confidence_scores = []
+        resp = _mock_gemini_response(grounding_supports=[sup])
+        grounding = CollectorOpenSearch._extract_grounding(resp)
+        assert grounding["supports"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: Real key_fact attribution
+# ---------------------------------------------------------------------------
+
+class TestRealKeyFactAttribution:
+    """Test that key_fact uses real grounding text when available."""
+
+    def test_key_fact_from_grounding_supports(self):
+        """key_fact should use real grounding text when available."""
+        grounding = {
+            "sources": [
+                {"uri": "https://www.fotmob.com/matches/123", "title": "FotMob Match Stats"},
+            ],
+            "supports": [
+                {"text": "Real Madrid had 8 shots outside the box.", "chunk_indices": [0], "confidence_scores": [0.9]},
+            ],
+        }
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, [])
+        assert sources[0]["key_fact"] == "Real Madrid had 8 shots outside the box."
+
+    def test_key_fact_falls_back_to_title(self):
+        """When no grounding_supports, key_fact should use title."""
+        grounding = {
+            "sources": [
+                {"uri": "https://www.fotmob.com/matches/123", "title": "FotMob Match Stats"},
+            ],
+            "supports": [],
+        }
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, [])
+        assert sources[0]["key_fact"] == "FotMob Match Stats"
+
+    def test_key_fact_concatenates_multiple_texts(self):
+        """Multiple text segments for same chunk should be concatenated."""
+        grounding = {
+            "sources": [
+                {"uri": "https://www.fotmob.com/matches/123", "title": "FotMob"},
+            ],
+            "supports": [
+                {"text": "Real Madrid had 8 shots outside the box.", "chunk_indices": [0], "confidence_scores": []},
+                {"text": "The match ended 2-1.", "chunk_indices": [0], "confidence_scores": []},
+            ],
+        }
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, [])
+        assert "8 shots outside the box" in sources[0]["key_fact"]
+        assert "match ended 2-1" in sources[0]["key_fact"]
+
+    def test_key_fact_truncated_at_500_chars(self):
+        """key_fact from supports should be truncated to 500 characters."""
+        grounding = {
+            "sources": [
+                {"uri": "https://example.com", "title": "Example"},
+            ],
+            "supports": [
+                {"text": "x" * 600, "chunk_indices": [0], "confidence_scores": []},
+            ],
+        }
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, [])
+        assert len(sources[0]["key_fact"]) == 500
+
+    def test_no_supports_key_defaults_to_empty_supports(self):
+        """When grounding dict has no 'supports' key, falls back to title."""
+        grounding = {
+            "sources": [
+                {"uri": "https://example.com", "title": "Example Page"},
+            ],
+        }
+        sources = CollectorOpenSearch._build_evidence_sources(grounding, [])
+        assert sources[0]["key_fact"] == "Example Page"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _analyze_sources prompt includes attributed text
+# ---------------------------------------------------------------------------
+
+class TestAnalyzeSourcesWithRealText:
+    """Test that _analyze_sources prompt includes the real attributed text."""
+
+    def test_prompt_includes_attributed_text(self):
+        """_analyze_sources prompt should include the real attributed text."""
+        evidence_sources = [{
+            "url": "https://www.fotmob.com/matches/123",
+            "source_id": "[1]",
+            "domain_name": "FotMob Match Stats",
+            "credibility_tier": 1,
+            "key_fact": "Real Madrid had 8 shots outside the box against Osasuna.",
+            "supports": "N/A",
+            "date_published": None,
+            "is_required_data_source": True,
+        }]
+
+        mock_llm = MagicMock()
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = json.dumps({"sources": [
+            {"source_id": "[1]", "key_fact": "8 shots outside the box.", "supports": "YES", "credibility_tier": 1},
+        ]})
+        mock_llm.chat.return_value = mock_llm_response
+
+        ctx = AgentContext.create_minimal()
+        ctx.llm = mock_llm
+
+        CollectorOpenSearch._analyze_sources(ctx, "Yes", "8 shots found.", evidence_sources)
+
+        # Check the prompt sent to LLM
+        call_args = mock_llm.chat.call_args
+        prompt_content = call_args[1]["messages"][0]["content"] if "messages" in call_args[1] else call_args[0][0][0]["content"]
+        assert "Attributed text:" in prompt_content
+        assert "8 shots outside the box" in prompt_content
+
+    def test_prompt_no_attributed_text_when_key_fact_equals_domain(self):
+        """When key_fact equals domain_name (no supports), no Attributed text line."""
+        evidence_sources = [{
+            "url": "https://www.fotmob.com/matches/123",
+            "source_id": "[1]",
+            "domain_name": "FotMob Match Stats",
+            "credibility_tier": 2,
+            "key_fact": "FotMob Match Stats",
+            "supports": "N/A",
+            "date_published": None,
+            "is_required_data_source": False,
+        }]
+
+        mock_llm = MagicMock()
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = json.dumps({"sources": [
+            {"source_id": "[1]", "key_fact": "Some fact.", "supports": "YES", "credibility_tier": 2},
+        ]})
+        mock_llm.chat.return_value = mock_llm_response
+
+        ctx = AgentContext.create_minimal()
+        ctx.llm = mock_llm
+
+        CollectorOpenSearch._analyze_sources(ctx, "Yes", "Found.", evidence_sources)
+
+        call_args = mock_llm.chat.call_args
+        prompt_content = call_args[1]["messages"][0]["content"] if "messages" in call_args[1] else call_args[0][0][0]["content"]
+        assert "Attributed text:" not in prompt_content

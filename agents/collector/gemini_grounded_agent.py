@@ -56,12 +56,14 @@ Reason: {reason}
 {sources_text}
 
 For each source, determine:
-1. key_fact: The specific fact this source contributes to the verdict (1-2 sentences)
+1. key_fact: Summarize the specific fact this source contributes (based on the ATTRIBUTED TEXT shown, NOT your own knowledge). If no attributed text is shown, write "No attributed text available."
 2. supports: Does this source support the verdict? "YES", "NO", or "N/A"
 3. credibility_tier: Integer 1-3 based on the source's authority:
    - 1 = authoritative primary source (government, official body, major wire service, domain-expert think tank like Brookings/CFR, top-tier newspaper of record like NYT/WSJ/BBC)
    - 2 = reputable mainstream source (well-known news outlet, established media, Wikipedia)
    - 3 = low-confidence source (blog, forum, opinion site, unknown outlet, social media)
+
+IMPORTANT: Base key_fact ONLY on the attributed text shown for each source. Do NOT invent or assume facts.
 
 Return JSON:
 {{"sources": [
@@ -582,26 +584,70 @@ class CollectorOpenSearch(BaseAgent):
         first: dict[str, Any],
         second: dict[str, Any],
     ) -> dict[str, Any]:
-        """Merge grounding metadata from two passes, deduplicating by URI."""
+        """Merge grounding metadata from two passes, deduplicating by URI.
+
+        Second-pass sources are prepended.  Supports from each pass have their
+        chunk_indices remapped to match the merged sources list.
+        """
         seen_uris: set[str] = set()
         merged_sources: list[dict[str, str]] = []
-        for src in second.get("sources", []) + first.get("sources", []):
+        # Build old→new index maps while deduplicating
+        second_idx_map: dict[int, int] = {}
+        for old_idx, src in enumerate(second.get("sources", [])):
             uri = src.get("uri", "")
             if uri and uri not in seen_uris:
+                second_idx_map[old_idx] = len(merged_sources)
+                seen_uris.add(uri)
+                merged_sources.append(src)
+        first_idx_map: dict[int, int] = {}
+        for old_idx, src in enumerate(first.get("sources", [])):
+            uri = src.get("uri", "")
+            if uri and uri not in seen_uris:
+                first_idx_map[old_idx] = len(merged_sources)
                 seen_uris.add(uri)
                 merged_sources.append(src)
         merged_queries = list(dict.fromkeys(
             first.get("search_queries", []) + second.get("search_queries", [])
         ))
-        return {"sources": merged_sources, "search_queries": merged_queries}
+        # Remap supports chunk_indices using the index maps
+        merged_supports: list[dict[str, Any]] = []
+        for sup in second.get("supports", []):
+            new_indices = [second_idx_map[i] for i in sup.get("chunk_indices", []) if i in second_idx_map]
+            if sup.get("text"):
+                merged_supports.append({
+                    "text": sup["text"],
+                    "chunk_indices": new_indices,
+                    "confidence_scores": sup.get("confidence_scores", []),
+                })
+        for sup in first.get("supports", []):
+            new_indices = [first_idx_map[i] for i in sup.get("chunk_indices", []) if i in first_idx_map]
+            if sup.get("text"):
+                merged_supports.append({
+                    "text": sup["text"],
+                    "chunk_indices": new_indices,
+                    "confidence_scores": sup.get("confidence_scores", []),
+                })
+        return {
+            "sources": merged_sources,
+            "search_queries": merged_queries,
+            "supports": merged_supports,
+        }
 
     @staticmethod
     def _build_evidence_sources(
         grounding: dict[str, Any],
         required_domains: list[dict[str, str]],
     ) -> list[dict[str, Any]]:
-        """Build evidence source dicts from grounding, marking data-source matches as tier 1."""
+        """Build evidence source dicts from grounding, with real text attribution."""
         req_domain_set = {d["domain"] for d in required_domains}
+
+        # Build per-chunk text attribution from grounding_supports
+        chunk_texts: dict[int, list[str]] = {}
+        for sup in grounding.get("supports", []):
+            text = sup.get("text", "")
+            for idx in sup.get("chunk_indices", []):
+                chunk_texts.setdefault(idx, []).append(text)
+
         evidence_sources: list[dict[str, Any]] = []
         for i, src in enumerate(grounding.get("sources", [])):
             uri = src.get("uri", "")
@@ -610,12 +656,20 @@ class CollectorOpenSearch(BaseAgent):
             is_required = any(
                 _source_matches_domain(src, rd) for rd in req_domain_set
             )
+
+            # Use real grounding text if available, fall back to title
+            attributed_texts = chunk_texts.get(i, [])
+            if attributed_texts:
+                key_fact = " ".join(attributed_texts)[:500]
+            else:
+                key_fact = src.get("title", "")
+
             evidence_sources.append({
                 "url": uri,
                 "source_id": f"[{i + 1}]",
                 "domain_name": src.get("title", "") or host or None,
                 "credibility_tier": 1 if is_required else 2,
-                "key_fact": src.get("title", ""),
+                "key_fact": key_fact,
                 "supports": "N/A",
                 "date_published": None,
                 "is_required_data_source": is_required,
@@ -638,8 +692,13 @@ class CollectorOpenSearch(BaseAgent):
         # Format numbered source list for the prompt
         lines: list[str] = []
         for i, src in enumerate(evidence_sources):
-            domain = src.get("domain_name", "") or src.get("key_fact", "")
-            lines.append(f"[{i + 1}] {domain}  (url: {src.get('url', '')})")
+            domain = src.get("domain_name", "") or "Unknown"
+            url = src.get("url", "")
+            attributed = src.get("key_fact", "")
+            block = f"[{i + 1}] {domain}  (url: {url})"
+            if attributed and attributed != domain:
+                block += f"\n    Attributed text: {attributed[:400]}"
+            lines.append(block)
         sources_text = "\n".join(lines)
 
         prompt = SOURCE_ANALYSIS_PROMPT.format(
@@ -698,8 +757,8 @@ class CollectorOpenSearch(BaseAgent):
 
     @staticmethod
     def _extract_grounding(response: Any) -> dict[str, Any]:
-        """Extract grounding metadata (search queries, source URLs) from response."""
-        result: dict[str, Any] = {"sources": [], "search_queries": []}
+        """Extract grounding metadata (search queries, source URLs, supports) from response."""
+        result: dict[str, Any] = {"sources": [], "search_queries": [], "supports": []}
 
         for candidate in getattr(response, "candidates", []):
             gm = getattr(candidate, "grounding_metadata", None)
@@ -720,6 +779,21 @@ class CollectorOpenSearch(BaseAgent):
                         result["sources"].append({
                             "uri": getattr(web, "uri", ""),
                             "title": getattr(web, "title", ""),
+                        })
+
+            # Extract grounding_supports (text-to-source mappings)
+            supports = getattr(gm, "grounding_supports", None)
+            if supports:
+                for sup in supports:
+                    seg = getattr(sup, "segment", None)
+                    text = getattr(seg, "text", None) if seg else None
+                    indices = getattr(sup, "grounding_chunk_indices", None) or []
+                    scores = getattr(sup, "confidence_scores", None) or []
+                    if text:
+                        result["supports"].append({
+                            "text": text,
+                            "chunk_indices": list(indices),
+                            "confidence_scores": list(scores),
                         })
 
         return result
