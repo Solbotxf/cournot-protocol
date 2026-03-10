@@ -76,7 +76,7 @@ class PromptEngineerResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ResolveRequest(BaseModel):
-    """Request for resolve step — runs collect → audit → judge → PoR bundle."""
+    """Request for resolve step — runs collect → quality check → audit → judge → PoR bundle."""
 
     prompt_spec: dict[str, Any] = Field(
         ..., description="Compiled prompt specification (from /step/prompt output)"
@@ -104,6 +104,17 @@ class ResolveRequest(BaseModel):
     llm_model: str | None = Field(
         default=None,
         description="Override LLM model (e.g. 'gpt-4o', 'claude-sonnet-4-20250514'). Uses provider default if omitted.",
+    )
+    enable_quality_check: bool = Field(
+        default=True,
+        description="Run quality check after collection with retry loop (up to 2 retries). "
+        "Defaults to True. Set to False to skip quality check and proceed directly to audit.",
+    )
+    max_quality_retries: int = Field(
+        default=2,
+        description="Maximum number of quality check retry iterations. Only used when enable_quality_check is True.",
+        ge=0,
+        le=5,
     )
 
 
@@ -506,6 +517,74 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
                 errors=errors + ["No evidence collected from any collector"],
             )
 
+        # Step 1.5: Quality check + retry loop (when enabled)
+        quality_scorecard = None
+        if request.enable_quality_check:
+            from agents.quality import compute_scorecard
+
+            for retry in range(request.max_quality_retries):
+                scorecard = await asyncio.to_thread(
+                    compute_scorecard, prompt_spec, evidence_bundles,
+                )
+                quality_scorecard = scorecard.model_dump(mode="json")
+
+                if scorecard.meets_threshold:
+                    logger.info(f"Quality check passed: level={scorecard.quality_level}")
+                    break
+
+                retry_hints = scorecard.retry_hints
+                if not retry_hints:
+                    logger.info("Quality below threshold but no retry hints — proceeding")
+                    break
+
+                logger.info(
+                    f"Quality check retry {retry + 1}/{request.max_quality_retries}: "
+                    f"level={scorecard.quality_level}"
+                )
+
+                # Retry collection with quality feedback
+                retry_ctx = get_agent_context(
+                    with_llm=True, with_http=True, llm_override=collector_override,
+                )
+                retry_ctx.extra["quality_feedback"] = retry_hints
+
+                retry_tasks = []
+                retry_names = []
+                for coll_name in request.collectors:
+                    try:
+                        if coll_name == "CollectorCRP":
+                            from agents.collector.crp_agent import CollectorCRP
+                            coll = CollectorCRP()
+                        else:
+                            coll = registry.get_agent_by_name(coll_name, retry_ctx)
+                    except ValueError:
+                        continue
+
+                    run_ctx = crp_resolve_ctx if coll_name == "CollectorCRP" else retry_ctx
+                    retry_tasks.append(asyncio.to_thread(coll.run, run_ctx, prompt_spec, tool_plan))
+                    retry_names.append(coll.name)
+
+                if retry_tasks:
+                    retry_results = await asyncio.gather(*retry_tasks, return_exceptions=True)
+                    for rname, rresult in zip(retry_names, retry_results):
+                        if isinstance(rresult, Exception):
+                            continue
+                        if not rresult.success:
+                            continue
+                        rbundle, _ = rresult.output
+                        rbundle.collector_name = rname
+                        evidence_bundles.append(rbundle)
+
+            # Final scorecard after retries
+            if not scorecard.meets_threshold:
+                scorecard = await asyncio.to_thread(
+                    compute_scorecard, prompt_spec, evidence_bundles,
+                )
+                quality_scorecard = scorecard.model_dump(mode="json")
+
+        # Extract temporal constraint from prompt_spec.extra (auto-detected by PE)
+        temporal_constraint = (prompt_spec.extra or {}).get("temporal_constraint")
+
         # Step 2: Run auditor
         # Build an auditor-specific context (respects agents.auditor.llm_override)
         auditor_override = build_llm_override(
@@ -514,6 +593,13 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
         auditor_ctx = get_agent_context(
             with_llm=True, with_http=True, llm_override=auditor_override,
         )
+
+        # Inject quality scorecard and temporal constraint into auditor context
+        if quality_scorecard:
+            auditor_ctx.extra["quality_context"] = quality_scorecard
+        if temporal_constraint:
+            auditor_ctx.extra["temporal_context"] = temporal_constraint
+
         logger.info(f"Running auditor with {len(evidence_bundles)} bundles")
         auditor = get_auditor(auditor_ctx)
         audit_result = await asyncio.to_thread(auditor.run, auditor_ctx, prompt_spec, evidence_bundles)
@@ -534,6 +620,13 @@ async def run_resolve(request: ResolveRequest) -> ResolveResponse:
         judge_ctx = get_agent_context(
             with_llm=True, with_http=True, llm_override=judge_override,
         )
+
+        # Inject quality scorecard and temporal constraint into judge context
+        if quality_scorecard:
+            judge_ctx.extra["quality_context"] = quality_scorecard
+        if temporal_constraint:
+            judge_ctx.extra["temporal_context"] = temporal_constraint
+
         logger.info("Running judge")
         judge = get_judge(judge_ctx)
         judge_result = await asyncio.to_thread(judge.run, judge_ctx, prompt_spec, evidence_bundles, reasoning_trace)

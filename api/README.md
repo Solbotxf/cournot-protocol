@@ -423,17 +423,41 @@ Build a cryptographically verifiable Proof of Reasoning bundle from all prior ar
 POST /step/resolve
 ```
 
-Run the full resolution pipeline (collect → audit → judge → PoR bundle) in a single call.
+Run the full resolution pipeline (collect → quality check → audit → judge → PoR bundle) in a single call. Quality check and temporal constraint are handled automatically — `temporal_constraint` is extracted from `prompt_spec.extra` and quality check runs with a retry loop by default.
 
 **Request Body:**
 ```json
 {
   "prompt_spec": { "..." : "..." },
   "tool_plan": { "..." : "..." },
-  "collectors": ["CollectorWebPageReader"],
-  "execution_mode": "development"
+  "collectors": ["CollectorOpenSearch"],
+  "execution_mode": "development",
+  "enable_quality_check": true,
+  "max_quality_retries": 2
 }
 ```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `prompt_spec` | object | yes | — | Compiled prompt specification (from `/step/prompt`) |
+| `tool_plan` | object | yes | — | Tool execution plan (from `/step/prompt`) |
+| `collectors` | list[string] | no | `["CollectorWebPageReader"]` | Which collectors to use |
+| `execution_mode` | string | no | `"development"` | `"production"`, `"development"`, or `"test"` |
+| `include_raw_content` | bool | no | `false` | Include raw_content in evidence items |
+| `llm_provider` | string | no | — | LLM provider override |
+| `llm_model` | string | no | — | LLM model override |
+| `enable_quality_check` | bool | no | `true` | Run quality check after collection with retry loop. Set `false` to skip. |
+| `max_quality_retries` | int | no | `2` | Max quality check retry iterations (0–5). Only used when `enable_quality_check` is `true`. |
+
+**What happens internally:**
+1. Collect evidence using specified collectors
+2. If `enable_quality_check` is `true`: run quality check, retry collection with feedback if below threshold (up to `max_quality_retries` times)
+3. Extract `temporal_constraint` from `prompt_spec.extra` (if auto-detected by prompt engineer)
+4. Run auditor with quality scorecard + temporal constraint injected
+5. Run judge with quality scorecard + temporal constraint injected
+6. Build PoR bundle
+
+No extra fields needed from the frontend — quality check and temporal constraint are fully automatic in this endpoint.
 
 ### Dispute
 
