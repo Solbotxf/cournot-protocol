@@ -111,6 +111,10 @@ class SourceReachability(BaseModel):
     reachable: bool = Field(..., description="Whether the URL returned a successful response")
     status_code: int | None = Field(default=None, description="HTTP status code (if any)")
     error: str | None = Field(default=None, description="Error message if unreachable")
+    method: str | None = Field(
+        default=None,
+        description="How the URL was reached: 'direct' (normal HTTP) or 'jina_reader' (via r.jina.ai proxy)",
+    )
 
 
 class ValidateResponse(BaseModel):
@@ -362,10 +366,13 @@ _CLOUDFLARE_MARKERS = [
 ]
 
 
-async def _probe_url(http_client: Any, url: str) -> SourceReachability:
-    """Probe a URL with a GET request to check reachability.
+_JINA_READER_PREFIX = "https://r.jina.ai/"
 
-    Detects Cloudflare challenge pages and other blockers.
+
+async def _probe_url_direct(http_client: Any, url: str) -> SourceReachability:
+    """Probe a URL with a direct GET request.
+
+    Returns reachability result including Cloudflare detection.
     """
     try:
         response = await asyncio.to_thread(
@@ -382,16 +389,68 @@ async def _probe_url(http_client: Any, url: str) -> SourceReachability:
                         url=url,
                         reachable=False,
                         status_code=status,
-                        error="Blocked by Cloudflare challenge — AI cannot access this source automatically. Consider using an API endpoint or news consensus instead.",
+                        method="direct",
+                        error="Blocked by Cloudflare challenge",
                     )
 
         if status < 400:
-            return SourceReachability(url=url, reachable=True, status_code=status)
+            return SourceReachability(url=url, reachable=True, status_code=status, method="direct")
 
-        return SourceReachability(url=url, reachable=False, status_code=status, error=f"HTTP {status}")
+        return SourceReachability(url=url, reachable=False, status_code=status, method="direct", error=f"HTTP {status}")
 
     except Exception as e:
-        return SourceReachability(url=url, reachable=False, error=str(e))
+        return SourceReachability(url=url, reachable=False, method="direct", error=str(e))
+
+
+async def _probe_url_jina(http_client: Any, url: str) -> SourceReachability:
+    """Probe a URL via Jina Reader (r.jina.ai) to bypass Cloudflare/JS walls.
+
+    Jina Reader renders the page and returns markdown content, making
+    JS-heavy and Cloudflare-protected sites readable by AI collectors.
+    """
+    jina_url = f"{_JINA_READER_PREFIX}{url}"
+    try:
+        response = await asyncio.to_thread(
+            http_client.get, jina_url, timeout=_PROBE_TIMEOUT + 5,
+        )
+        status = response.status_code
+
+        if status < 400:
+            return SourceReachability(url=url, reachable=True, status_code=status, method="jina_reader")
+
+        return SourceReachability(
+            url=url, reachable=False, status_code=status, method="jina_reader",
+            error=f"Jina Reader returned HTTP {status}",
+        )
+
+    except Exception as e:
+        return SourceReachability(url=url, reachable=False, method="jina_reader", error=f"Jina Reader: {e}")
+
+
+async def _probe_url(http_client: Any, url: str) -> SourceReachability:
+    """Probe a URL for reachability, falling back to Jina Reader.
+
+    1. Try direct HTTP GET — fast, works for most sites.
+    2. If direct fails (Cloudflare, 403, 5xx, timeout), try Jina Reader
+       which can bypass Cloudflare and render JS-heavy pages.
+    """
+    direct = await _probe_url_direct(http_client, url)
+    if direct.reachable:
+        return direct
+
+    # Fallback to Jina Reader for blocked/failed URLs
+    jina = await _probe_url_jina(http_client, url)
+    if jina.reachable:
+        return jina
+
+    # Both failed — return direct error with note about Jina fallback
+    return SourceReachability(
+        url=url,
+        reachable=False,
+        status_code=direct.status_code,
+        method="direct",
+        error=f"{direct.error or 'Direct request failed'}. Jina Reader also failed: {jina.error or 'unknown'}",
+    )
 
 
 async def _probe_sources(http_client: Any, urls: list[str]) -> list[SourceReachability]:
