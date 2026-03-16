@@ -89,11 +89,6 @@ class DisputePatch(BaseModel):
 
 
 class DisputeRequest(BaseModel):
-    mode: Literal["reasoning_only", "full_rerun"] = Field(
-        default="reasoning_only",
-        description="reasoning_only reruns downstream steps using provided evidence. full_rerun re-collects evidence then reruns.",
-    )
-
     # Optional dashboard correlation only (stateless: no lookup)
     case_id: str | None = Field(default=None)
 
@@ -109,9 +104,12 @@ class DisputeRequest(BaseModel):
     # Optional: if present, allow judge-only rerun
     reasoning_trace: dict[str, Any] | None = None
 
-    # Optional: required for full_rerun (stateless re-collect)
+    # Required for EVIDENCE_MISREAD (re-run original collectors)
     tool_plan: dict[str, Any] | None = None
     collectors: list[str] | None = None
+
+    # Required for EVIDENCE_INSUFFICIENT (auto-collect from URLs/domains)
+    evidence_urls: list[str] | None = Field(default=None, max_length=10)
 
     # Optional patch operations (e.g., append evidence items, prompt_spec_override)
     patch: DisputePatch | dict[str, Any] | None = None
@@ -154,10 +152,10 @@ object that maps the dispute onto protocol internals.
 Return ONLY valid JSON with these fields:
 
 {
-  "mode": "reasoning_only" | "full_rerun",
   "target_artifact": "evidence_bundle" | "reasoning_trace" | "verdict" | "prompt_spec",
   "target_leaf_path": "<optional JSONPath-like pointer, e.g. items[0].extracted_fields.outcome>",
   "structured_message": "<enhanced, structured version of the user's message>",
+  "extracted_urls": ["<any URLs or domains mentioned in the user's message>"],
   "evidence_assessments": [
     {
       "url_index": 0,
@@ -168,9 +166,6 @@ Return ONLY valid JSON with these fields:
 }
 
 Rules:
-- "mode": Use "reasoning_only" unless the user explicitly asks for new evidence
-  collection or the reason_code is EVIDENCE_INSUFFICIENT and the dispute clearly
-  needs fresh evidence. Default to "reasoning_only".
 - "target_artifact": Pick the most relevant artifact being disputed.
   - EVIDENCE_MISREAD / EVIDENCE_INSUFFICIENT → "evidence_bundle"
   - REASONING_ERROR / LOGIC_GAP → "reasoning_trace"
@@ -179,6 +174,9 @@ Rules:
   provide the path. Otherwise null.
 - "structured_message": Rewrite the user's message to be clear, specific, and
   reference the relevant evidence. Keep the user's intent intact.
+- "extracted_urls": Extract any URLs (e.g. https://espn.com/article/123) or
+  bare domains (e.g. espn.com) the user mentions in their message. Return an
+  empty array if none are found.
 - "evidence_assessments": One entry per URL provided (by index). If no URLs were
   provided, return an empty array. Each assessment should state the outcome the
   URL supports and why.
@@ -282,11 +280,11 @@ async def _fetch_url_content(
 # -----------------------------
 
 _RERUN_PLAN: dict[ReasonCode, list[str]] = {
-    "REASONING_ERROR": ["judge"],
-    "LOGIC_GAP": ["judge"],
-    "EVIDENCE_MISREAD": ["audit", "judge"],
-    "EVIDENCE_INSUFFICIENT": ["audit", "judge"],
-    "OTHER": ["judge"],
+    "REASONING_ERROR": ["audit", "judge"],
+    "LOGIC_GAP": ["audit", "judge"],
+    "EVIDENCE_MISREAD": ["collect", "audit", "judge"],
+    "EVIDENCE_INSUFFICIENT": ["collect", "audit", "judge"],
+    "OTHER": ["audit", "judge"],
 }
 
 
@@ -329,18 +327,69 @@ def _deep_merge(base: Any, override: Any) -> Any:
 
 
 # -----------------------------
+# URL Classification + Synthetic Requirement
+# -----------------------------
+
+
+def _classify_url(raw: str) -> Literal["url", "domain"]:
+    """Classify a raw string as a full URL or a bare domain.
+
+    - If it starts with http(s):// and has a path beyond ``/`` → ``"url"``
+    - Otherwise (bare domain or root-only URL) → ``"domain"``
+    """
+    from urllib.parse import urlparse
+
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        # Has a meaningful path beyond "/"
+        if parsed.path and parsed.path.rstrip("/"):
+            return "url"
+        return "domain"
+    # Bare domain like "espn.com"
+    return "domain"
+
+
+def _build_dispute_requirement(
+    prompt_spec: Any,
+    evidence_urls: list[str],
+) -> Any:
+    """Build a DataRequirement from dispute-provided URLs/domains."""
+    from core.schemas.prompts import DataRequirement, SourceTarget, SelectionPolicy
+
+    source_targets = []
+    for raw_url in evidence_urls:
+        kind = _classify_url(raw_url)
+        uri = raw_url if raw_url.startswith("http") else f"https://{raw_url}/"
+        source_targets.append(SourceTarget(
+            source_id="web",
+            uri=uri,
+            method="GET",
+            expected_content_type="html",
+            operation="search" if kind == "domain" else "fetch",
+        ))
+    return DataRequirement(
+        requirement_id="dispute_evidence",
+        description=prompt_spec.market.question,
+        source_targets=source_targets,
+        selection_policy=SelectionPolicy(
+            strategy="single_best",
+            min_sources=1,
+            max_sources=len(source_targets),
+            quorum=1,
+        ),
+    )
+
+
+# -----------------------------
 # Route
 # -----------------------------
 
 
 @router.post("/dispute", response_model=DisputeResponse)
 async def dispute(request: DisputeRequest) -> DisputeResponse:
-    """Rerun audit/judge based on a dispute, returning new artifacts."""
+    """Rerun collect/audit/judge based on a dispute reason_code."""
 
-    if request.mode not in ("reasoning_only", "full_rerun"):
-        raise InvalidRequestError("Invalid mode")
-
-    rerun_plan = _RERUN_PLAN.get(request.reason_code, ["judge"])
+    rerun_plan = _RERUN_PLAN.get(request.reason_code, ["audit", "judge"])
 
     # Parse artifacts into core schemas (strict validation)
     try:
@@ -386,76 +435,101 @@ async def dispute(request: DisputeRequest) -> DisputeResponse:
 
     executed_plan: list[str] = []
 
-    # Optional: full rerun includes evidence collection
-    if request.mode == "full_rerun":
-        if request.tool_plan is None:
-            raise InvalidRequestError("tool_plan is required for mode=full_rerun")
-        if not request.collectors:
-            raise InvalidRequestError("collectors is required for mode=full_rerun")
+    # ------------------------------------------------------------------
+    # Collect step (reason_code-driven)
+    # ------------------------------------------------------------------
+    if "collect" in rerun_plan:
+        if request.reason_code == "EVIDENCE_MISREAD":
+            # Re-run original collectors with dispute context
+            if request.tool_plan is None:
+                raise InvalidRequestError(
+                    "tool_plan is required for reason_code=EVIDENCE_MISREAD"
+                )
+            if not request.collectors:
+                raise InvalidRequestError(
+                    "collectors is required for reason_code=EVIDENCE_MISREAD"
+                )
 
-        try:
-            from core.schemas.transport import ToolPlan
-            from core.schemas.evidence import EvidenceBundle
-            from agents.registry import get_registry
-            from api.deps import build_llm_override
-
-            tool_plan = ToolPlan(**request.tool_plan)
-        except Exception as e:
-            raise InvalidRequestError(f"Invalid tool_plan: {e}")
-
-        registry = get_registry()
-
-        collector_override = build_llm_override(None, None, agent_name="collector")
-        collector_ctx = get_agent_context(with_llm=True, with_http=True, llm_override=collector_override)
-
-        tasks = []
-        task_names = []
-        for collector_name in request.collectors:
             try:
-                # Match /step/resolve collector instantiation patterns
-                if collector_name == "CollectorPAN":
-                    from agents.collector.pan_agent import PANCollectorAgent
-                    collector = PANCollectorAgent()
-                elif collector_name == "CollectorOpenSearch":
-                    from agents.collector.gemini_grounded_agent import CollectorOpenSearch
-                    collector = CollectorOpenSearch()
-                elif collector_name == "CollectorSitePinned":
-                    from agents.collector.source_pinned_agent import CollectorSitePinned
-                    collector = CollectorSitePinned()
-                elif collector_name == "CollectorCRP":
-                    from agents.collector.crp_agent import CollectorCRP
-                    collector = CollectorCRP()
-                else:
-                    collector = registry.get_agent_by_name(collector_name, collector_ctx)
+                from core.schemas.transport import ToolPlan
+
+                tool_plan = ToolPlan(**request.tool_plan)
             except Exception as e:
-                raise InvalidRequestError(f"Collector not found: {collector_name} ({e})")
+                raise InvalidRequestError(f"Invalid tool_plan: {e}")
 
-            tasks.append(asyncio.to_thread(collector.run, collector_ctx, prompt_spec, tool_plan))
-            task_names.append(collector.name)
+            evidence_bundles = await _run_collectors(
+                ctx, prompt_spec, tool_plan, request.collectors, request.message,
+            )
+            if not evidence_bundles:
+                raise InvalidRequestError(
+                    "No evidence collected for EVIDENCE_MISREAD dispute"
+                )
+            executed_plan.append("collect")
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        elif request.reason_code == "EVIDENCE_INSUFFICIENT":
+            # Auto-collect from user-provided evidence_urls
+            if not request.evidence_urls:
+                raise InvalidRequestError(
+                    "evidence_urls is required for reason_code=EVIDENCE_INSUFFICIENT"
+                )
 
-        evidence_bundles = []
-        for name, result in zip(task_names, results):
-            if isinstance(result, Exception):
-                logger.warning(f"Collector {name} failed: {result}")
-                continue
-            if not getattr(result, "success", False):
-                logger.warning(f"Collector {name} failed: {getattr(result, 'error', None)}")
-                continue
-            bundle, _ = result.output
-            bundle.collector_name = name
-            evidence_bundles.append(bundle)
+            dispute_req = _build_dispute_requirement(prompt_spec, request.evidence_urls)
 
-        if not evidence_bundles:
-            raise InvalidRequestError("No evidence collected in full_rerun")
+            # Build a synthetic ToolPlan containing the dispute requirement
+            from core.schemas.transport import ToolPlan
 
-        executed_plan.append("collect")
+            tool_plan = ToolPlan(
+                plan_id="dispute_evidence_plan",
+                requirements=[dispute_req.requirement_id],
+                sources=["web"],
+            )
 
-    # Audit (if requested or if reasoning_trace missing)
+            # Inject the dispute requirement into prompt_spec so collectors can find it
+            prompt_spec.data_requirements.append(dispute_req)
+
+            # Choose collectors based on URL classification
+            collector_names: list[str] = []
+            for url in request.evidence_urls:
+                kind = _classify_url(url)
+                if kind == "domain":
+                    collector_names.append("CollectorSitePinned")
+                else:
+                    collector_names.append("CollectorWebPageReader")
+            # Deduplicate while preserving order
+            seen: set[str] = set()
+            unique_collectors: list[str] = []
+            for c in collector_names:
+                if c not in seen:
+                    seen.add(c)
+                    unique_collectors.append(c)
+
+            new_bundles = await _run_collectors(
+                ctx, prompt_spec, tool_plan, unique_collectors, request.message,
+            )
+
+            if not new_bundles:
+                raise InvalidRequestError(
+                    "No evidence collected for EVIDENCE_INSUFFICIENT dispute"
+                )
+
+            # Merge newly collected evidence into existing bundles
+            if evidence_bundles:
+                # Append items from new bundles into the first existing bundle
+                for nb in new_bundles:
+                    evidence_bundles[0].items.extend(nb.items)
+            else:
+                evidence_bundles = new_bundles
+
+            executed_plan.append("collect")
+
+    # ------------------------------------------------------------------
+    # Audit (if in rerun_plan or reasoning_trace missing)
+    # ------------------------------------------------------------------
     if "audit" in rerun_plan or reasoning_trace is None:
         if not evidence_bundles:
-            raise InvalidRequestError("evidence_bundle is required for reasoning_only, or enable full_rerun")
+            raise InvalidRequestError(
+                "evidence_bundle is required for dispute"
+            )
         auditor = get_auditor(ctx)
         audit_result = await asyncio.to_thread(auditor.run, ctx, prompt_spec, evidence_bundles)
         if not audit_result.success:
@@ -463,7 +537,9 @@ async def dispute(request: DisputeRequest) -> DisputeResponse:
         reasoning_trace = audit_result.output
         executed_plan.append("audit")
 
+    # ------------------------------------------------------------------
     # Judge
+    # ------------------------------------------------------------------
     judge = get_judge(ctx)
     judge_result = await asyncio.to_thread(judge.run, ctx, prompt_spec, evidence_bundles, reasoning_trace)
     if not judge_result.success:
@@ -495,6 +571,83 @@ async def dispute(request: DisputeRequest) -> DisputeResponse:
         artifacts=artifacts,
         diff=diff,
     )
+
+
+# ------------------------------------------------------------------
+# Collector runner (shared by EVIDENCE_MISREAD + EVIDENCE_INSUFFICIENT)
+# ------------------------------------------------------------------
+
+
+async def _run_collectors(
+    ctx: Any,
+    prompt_spec: Any,
+    tool_plan: Any,
+    collector_names: list[str],
+    dispute_message: str,
+) -> list[Any]:
+    """Instantiate and run collectors, injecting dispute context.
+
+    Returns a list of successful EvidenceBundles (may be empty).
+    """
+    from agents.registry import get_registry
+    from api.deps import build_llm_override, get_agent_context as _get_ctx
+
+    registry = get_registry()
+
+    collector_override = build_llm_override(None, None, agent_name="collector")
+    collector_ctx = _get_ctx(with_llm=True, with_http=True, llm_override=collector_override)
+
+    # Inject dispute context + quality feedback into collector context
+    collector_ctx.extra["dispute_context"] = ctx.extra.get("dispute_context", {})
+    collector_ctx.extra["quality_feedback"] = {
+        "collector_guidance": dispute_message,
+    }
+
+    tasks = []
+    task_names = []
+    for collector_name in collector_names:
+        try:
+            if collector_name == "CollectorPAN":
+                from agents.collector.pan_agent import PANCollectorAgent
+                collector = PANCollectorAgent()
+            elif collector_name == "CollectorOpenSearch":
+                from agents.collector.gemini_grounded_agent import CollectorOpenSearch
+                collector = CollectorOpenSearch()
+            elif collector_name == "CollectorSitePinned":
+                from agents.collector.source_pinned_agent import CollectorSitePinned
+                collector = CollectorSitePinned()
+            elif collector_name == "CollectorCRP":
+                from agents.collector.crp_agent import CollectorCRP
+                collector = CollectorCRP()
+            elif collector_name == "CollectorAPIData":
+                from agents.collector.api_data_agent import CollectorAPIData
+                collector = CollectorAPIData()
+            elif collector_name == "CollectorWebPageReader":
+                from agents.collector.agent import CollectorWebPageReader
+                collector = CollectorWebPageReader()
+            else:
+                collector = registry.get_agent_by_name(collector_name, collector_ctx)
+        except Exception as e:
+            raise InvalidRequestError(f"Collector not found: {collector_name} ({e})")
+
+        tasks.append(asyncio.to_thread(collector.run, collector_ctx, prompt_spec, tool_plan))
+        task_names.append(collector.name)
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    evidence_bundles = []
+    for name, result in zip(task_names, results):
+        if isinstance(result, Exception):
+            logger.warning("Collector %s failed: %s", name, result)
+            continue
+        if not getattr(result, "success", False):
+            logger.warning("Collector %s failed: %s", name, getattr(result, "error", None))
+            continue
+        bundle, _ = result.output
+        bundle.collector_name = name
+        evidence_bundles.append(bundle)
+
+    return evidence_bundles
 
 
 # -----------------------------
@@ -616,22 +769,29 @@ async def dispute_llm(request: DisputeLLMRequest) -> DisputeResponse:
         logger.warning("LLM dispute parse failed, using fallback: %s", e)
         # Fallback: use reason_code to pick reasonable defaults
         parsed = {
-            "mode": "reasoning_only",
             "target_artifact": _LLM_FALLBACK_TARGETS.get(request.reason_code, "reasoning_trace"),
             "target_leaf_path": None,
             "structured_message": request.message,
+            "extracted_urls": [],
             "evidence_assessments": [],
         }
 
     # --- Step 3: Build DisputeRequest from LLM output ---
-    mode = parsed.get("mode", "reasoning_only")
-    if mode not in ("reasoning_only", "full_rerun"):
-        mode = "reasoning_only"
-
     target_artifact = parsed.get("target_artifact", "reasoning_trace")
     target_leaf_path = parsed.get("target_leaf_path")
     structured_message = parsed.get("structured_message", request.message)
     evidence_assessments = parsed.get("evidence_assessments", [])
+
+    # Merge extracted_urls from LLM with explicitly provided evidence_urls (deduplicate)
+    extracted_urls: list[str] = parsed.get("extracted_urls", [])
+    explicit_urls: list[str] = list(request.evidence_urls) if request.evidence_urls else []
+    all_urls_ordered: list[str] = []
+    seen_urls: set[str] = set()
+    for u in explicit_urls + extracted_urls:
+        normalized = u.strip().rstrip("/").lower()
+        if normalized and normalized not in seen_urls:
+            seen_urls.add(normalized)
+            all_urls_ordered.append(u.strip())
 
     # Build target
     target = DisputeTarget(artifact=target_artifact, leaf_path=target_leaf_path)
@@ -671,17 +831,17 @@ async def dispute_llm(request: DisputeLLMRequest) -> DisputeResponse:
     if evidence_items_append:
         patch = DisputePatch(evidence_items_append=evidence_items_append)
 
-    # Assemble the full DisputeRequest
+    # Assemble the full DisputeRequest — reason_code drives what steps run
     dispute_request = DisputeRequest(
-        mode=mode,
         reason_code=request.reason_code,
         message=structured_message,
         target=target,
         prompt_spec=request.prompt_spec,
         evidence_bundle=request.evidence_bundle,
         reasoning_trace=request.reasoning_trace,
-        tool_plan=request.tool_plan if mode == "full_rerun" else None,
-        collectors=request.collectors if mode == "full_rerun" else None,
+        tool_plan=request.tool_plan,
+        collectors=request.collectors,
+        evidence_urls=all_urls_ordered or None,
         patch=patch,
     )
 
