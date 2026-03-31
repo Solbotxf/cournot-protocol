@@ -607,12 +607,13 @@ class CollectorOpenSearch(BaseAgent):
     # ------------------------------------------------------------------
 
     def _resolve_api_key(self, ctx: "AgentContext") -> str | None:
-        """Resolve Google API key from config or environment."""
-        # From RuntimeConfig (if provider is google, use its key)
-        if ctx.config and ctx.config.llm.provider == "google" and ctx.config.llm.api_key:
-            return ctx.config.llm.api_key
+        """Resolve Google API key for native google-genai SDK.
 
-        return os.getenv("GOOGLE_API_KEY")
+        Delegates to ``core.llm.credentials.get_native_google_key()``
+        which is the single source of truth for credential resolution.
+        """
+        from core.llm.credentials import get_native_google_key
+        return get_native_google_key()
 
     def _get_client(self, api_key: str) -> Any:
         """Create the google-genai client (lazy import)."""

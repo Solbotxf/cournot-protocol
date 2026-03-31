@@ -13,6 +13,13 @@ All calls are recorded via ReceiptRecorder for auditability.
 from typing import Optional, Any
 
 from .client import LLMClient, LLMResponse
+from .credentials import (
+    PROVIDER_ENV_KEYS,
+    PROVIDER_DEFAULT_MODELS,
+    get_configured_providers,
+    resolve_credentials,
+    get_native_google_key,
+)
 from .determinism import DecodingPolicy, policy_to_provider_args
 from .providers import (
     LLMProvider,
@@ -22,9 +29,6 @@ from .providers import (
     GrokProvider,
     MockProvider,
     create_provider,
-    PROVIDER_ENV_KEYS,
-    PROVIDER_DEFAULT_MODELS,
-    get_configured_providers,
 )
 
 def create_llm_client(
@@ -53,16 +57,7 @@ def create_llm_client(
 
     Returns:
         Configured LLMClient instance
-
-    Example:
-        client = create_llm_client(
-            provider="anthropic",
-            api_key="sk-...",
-            model="claude-sonnet-4-20250514",
-        )
-        response = client.chat([{"role": "user", "content": "Hello!"}])
     """
-    # Build provider kwargs
     provider_kwargs = {}
     if api_key:
         provider_kwargs["api_key"] = api_key
@@ -70,10 +65,8 @@ def create_llm_client(
         provider_kwargs["base_url"] = endpoint
     provider_kwargs.update(kwargs)
 
-    # Create provider
     llm_provider = create_provider(provider, model=model, proxy=proxy, **provider_kwargs)
-    
-    # Create client
+
     return LLMClient(
         provider=llm_provider,
         default_policy=default_policy,
@@ -96,4 +89,6 @@ __all__ = [
     "PROVIDER_ENV_KEYS",
     "PROVIDER_DEFAULT_MODELS",
     "get_configured_providers",
+    "resolve_credentials",
+    "get_native_google_key",
 ]

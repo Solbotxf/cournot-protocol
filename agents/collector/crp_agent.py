@@ -792,9 +792,9 @@ class CollectorCRP(BaseAgent):
     # ------------------------------------------------------------------
 
     def _resolve_google_api_key(self, ctx: "AgentContext") -> str | None:
-        if ctx.config and ctx.config.llm.provider == "google" and ctx.config.llm.api_key:
-            return ctx.config.llm.api_key
-        return os.getenv("GOOGLE_API_KEY")
+        """Resolve Google API key for native google-genai SDK."""
+        from core.llm.credentials import get_native_google_key
+        return get_native_google_key()
 
     def _get_gemini_client(self, api_key: str) -> Any:
         try:

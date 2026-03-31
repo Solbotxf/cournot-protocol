@@ -27,10 +27,19 @@ class LLMConfig:
     max_tokens: int = 8192
     
     def __post_init__(self):
-        # Load API key from environment if not provided
-        if self.api_key is None:
-            env_var = f"{self.provider.upper()}_API_KEY"
-            self.api_key = os.getenv(env_var)
+        from core.llm.credentials import resolve_credentials, is_unified_mode
+        resolved_key, resolved_base = resolve_credentials(self.provider)
+
+        if is_unified_mode():
+            # Unified mode: gateway credentials ALWAYS win over config-file
+            # values (cournot.json may contain stale per-provider URLs).
+            self.api_key = resolved_key
+            self.base_url = resolved_base
+        else:
+            if self.api_key is None:
+                self.api_key = resolved_key
+            if self.base_url is None:
+                self.base_url = resolved_base
 
 
 # Generic browser User-Agent (simulates a real user, not tied to any specific machine).
@@ -156,12 +165,15 @@ class RuntimeConfig:
         """
         Get configuration overrides from environment variables.
 
-        This is the SINGLE source of truth for all env var reading.
+        LLM credentials (api_key, base_url) are NOT resolved here — they
+        are handled by ``core.llm.credentials.resolve_credentials`` which
+        is called from ``LLMConfig.__post_init__``.  This method only
+        handles non-credential overrides and explicit ``COURNOT_LLM_*``
+        provider/model selection.
 
         Supported variables:
         - COURNOT_LLM_PROVIDER: LLM provider name
         - COURNOT_LLM_MODEL: LLM model name
-        - COURNOT_LLM_API_KEY: LLM API key (also checks {PROVIDER}_API_KEY)
         - COURNOT_STRICT_MODE: Enable strict mode (true/false)
         - COURNOT_DEBUG: Enable debug mode (true/false)
         - COURNOT_HTTP_PROXY: HTTP proxy URL
@@ -170,13 +182,11 @@ class RuntimeConfig:
         """
         overrides: dict[str, Any] = {}
 
-        # LLM settings
+        # LLM provider/model selection (credentials resolved by LLMConfig)
         if os.getenv("COURNOT_LLM_PROVIDER"):
             overrides.setdefault("llm", {})["provider"] = os.getenv("COURNOT_LLM_PROVIDER")
         if os.getenv("COURNOT_LLM_MODEL"):
             overrides.setdefault("llm", {})["model"] = os.getenv("COURNOT_LLM_MODEL")
-        if os.getenv("COURNOT_LLM_API_KEY"):
-            overrides.setdefault("llm", {})["api_key"] = os.getenv("COURNOT_LLM_API_KEY")
 
         # Pipeline settings
         if os.getenv("COURNOT_STRICT_MODE"):
