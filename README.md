@@ -282,7 +282,7 @@ por_root = SHA256(
 )
 ```
 
-This single hash can be committed on-chain for trustless verification.
+This single hash is committed on-chain to BSC (BNB Smart Chain) for trustless verification.
 
 ### Agent Capabilities
 
