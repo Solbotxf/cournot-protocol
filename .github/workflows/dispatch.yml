@@ -1,0 +1,46 @@
+name: 🚀 dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets_environment_note:
+        type: string
+        required: false
+        default: "⚠️ 请根据需要选择部署的目标环境"
+        description: "📌 提示：此字段仅作说明用途，请勿修改"
+
+      environment:
+        type: choice
+        required: true
+        options:
+          - CARV
+        description: "🌍 选择当前服务需要部署的目标环境"
+
+      stage:
+        type: choice
+        required: true
+        options:
+          - prod
+          - dev
+        description: "🐶 选择需要部署的远端的集群环境"
+
+jobs:
+  build:
+    uses: Cournot-AI/ci-templates/.github/workflows/build.yml@main
+    secrets: inherit
+    with:
+      environment: ${{ inputs.environment }}
+      registry: carv-harbor-tk.tencentcloudcr.com
+      stage: ${{ inputs.stage }}
+
+  release:
+    needs: build
+    uses: Cournot-AI/ci-templates/.github/workflows/release.yml@main
+    secrets: inherit
+    with:
+      app: cournot-protocol
+      image: ${{ needs.build.outputs.image }}
+      stage: ${{ needs.build.outputs.stage }}
+      environment: ${{ inputs.environment }}
+
+
