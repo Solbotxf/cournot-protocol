@@ -242,7 +242,7 @@ IMPORTANT for U-07:
 #### BINARY_EVENT
 | BIN-01 | "Yes" criteria fully specified | "What specific, verifiable condition must be met for Yes?" |
 | BIN-02 | Verification method clear | "How can the system verify this? Please provide a specific URL or data source." |
-| BIN-03 | Edge cases addressed | "What happens if the event is partially true? (e.g., event happens but after the deadline)" |
+| BIN-03 | Edge cases addressed | "What happens if the event is partially true, cancelled, postponed, or occurs after the deadline?" |
 
 #### OPINION_NOVELTY
 | NOVEL-01 | Title matches actual resolution criteria | "Your title may be misleading. Consider making the title clearer to match the actual resolution criteria." |
@@ -267,9 +267,10 @@ Assign risk points based on these factors:
 | Data source likely behind Cloudflare/paywall (non-API news sites, etc.) | +20 | |
 
 IMPORTANT: The "Single data source with no fallback" risk factor (+30) MUST be applied
-when U-07 fails. These are linked — if U-07 fails, this risk factor applies. If U-07
-passes (because the market has consensus language or multiple sources), this risk factor
-MUST NOT be applied.
+when U-07 fails OR when its type-specific replacement (TEMP-04 or GEO-02) fails.
+These are linked — if the fallback-source check fails (whether it is U-07, TEMP-04,
+or GEO-02), this risk factor applies. If the applicable check passes (because the
+market has consensus language or multiple sources), this risk factor MUST NOT be applied.
 
 Risk levels:
 - 0-15: LOW — approved for automated resolution
@@ -315,6 +316,27 @@ Rules:
 - Be thorough but do not invent checks beyond the ones listed above.
 - The risk score must equal the sum of the risk_factors points.
 - Do NOT include risk factors that don't apply.
+
+## DEDUPLICATION: Suppress overlapping universal checks
+
+Some universal checks overlap with type-specific checks that provide better, more
+targeted suggestions. When a market is classified as one of the types below, SUPPRESS
+the listed universal checks entirely — do NOT include them in `checks_passed` or
+`checks_failed`. The type-specific replacement handles pass/fail instead.
+
+| Market Type | Suppress Universal | Replaced By |
+|---|---|---|
+| FINANCIAL_PRICE | U-02 | FIN-03 |
+| TEMPERATURE | U-02, U-07 | TEMP-03, TEMP-04 |
+| CRYPTO_THRESHOLD | U-03 | CRYPTO-03 |
+| SPORTS_MATCH / SPORTS_EXACT_SCORE | U-02 | SPORT-04 |
+| SPORTS_PLAYER_PROP | U-02 | PROP-03 |
+| SPEECH_CONTENT | U-02 | SPEECH-02 |
+| GEOPOLITICAL_EVENT | U-03, U-07 | GEO-04, GEO-02 |
+| BINARY_EVENT | U-02, U-04, U-06 | BIN-02, BIN-01, BIN-03 |
+
+OPINION_NOVELTY and MULTI_CHOICE_EVENT have no suppressions — run all universal checks.
+U-01 and U-05 are never suppressed (no type-specific equivalents exist).
 
 ## IMPORTANT: Recognizing fallback sources and consensus language
 
