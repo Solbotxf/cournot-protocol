@@ -520,7 +520,7 @@ class TestCollectorAPIData:
         item = bundle.items[0]
         assert item.success
         assert item.requirement_id == "req_weather"
-        assert item.extracted_fields["temperature_c"] == 18.5
+        assert item.extracted_fields["api_data"]["temperature_c"] == 18.5
         assert item.provenance.source_id == "open_meteo"
         assert item.provenance.tier == 3
         assert "req_weather" in bundle.requirements_fulfilled
@@ -552,8 +552,8 @@ class TestCollectorAPIData:
         item = bundle.items[0]
         assert item.success
         assert item.requirement_id == "req_crypto"
-        assert "BTC" in item.extracted_fields
-        assert item.extracted_fields["BTC"]["price_usd"] == 95000.0
+        assert "BTC" in item.extracted_fields["api_data"]
+        assert item.extracted_fields["api_data"]["BTC"]["price_usd"] == 95000.0
         assert item.provenance.source_id == "coinmarketcap"
 
     def test_no_match_returns_error_evidence(self):
@@ -1025,7 +1025,7 @@ class TestBuenosAiresIntegration:
         assert len(bundle.items) == 1
         item = bundle.items[0]
         assert item.success is True
-        assert item.extracted_fields["temperature_2m_max"] == 27.3
+        assert item.extracted_fields["api_data"]["temperature_2m_max"] == 27.3
         assert item.provenance.source_id == "open_meteo"
 
         # Verify the HTTP call used archive URL with correct coords
@@ -1093,7 +1093,7 @@ class TestLLMParamExtraction:
         assert len(bundle.items) == 1
         item = bundle.items[0]
         assert item.success is True
-        assert item.extracted_fields["temperature_2m_max"] == 27.0
+        assert item.extracted_fields["api_data"]["temperature_2m_max"] == 27.0
 
     def test_llm_extraction_fallback_on_bad_json(self):
         """Invalid LLM JSON output → falls back to hint_params."""
@@ -1215,11 +1215,11 @@ class TestLLMResponseInterpretation:
         bundle, _ = result.output
         item = bundle.items[0]
         assert item.success is True
-        assert item.extracted_fields["interpretation"] == (
+        assert item.extracted_fields["api_data"]["interpretation"] == (
             "Current temperature in London is 15°C."
         )
-        assert item.extracted_fields["interpretation_confidence"] == 0.92
-        assert item.extracted_fields["relevant_data"] == {"temperature_c": 15.0}
+        assert item.extracted_fields["api_data"]["interpretation_confidence"] == 0.92
+        assert item.extracted_fields["api_data"]["relevant_data"] == {"temperature_c": 15.0}
 
     @patch("httpx.get")
     def test_interpretation_skipped_on_api_failure(self, mock_get):

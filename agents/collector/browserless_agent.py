@@ -607,6 +607,7 @@ class CollectorBrowserless(CollectorSitePinned):
                     **bl_meta,
                 }
 
+                bl_host = (urlparse(bl_url).netloc or "").lower().lstrip("www.")
                 return EvidenceItem(
                     evidence_id=evidence_id,
                     requirement_id=req_id,
@@ -624,14 +625,19 @@ class CollectorBrowserless(CollectorSitePinned):
                         "reason": reason,
                         "evidence_sources": [{
                             "url": bl_url,
-                            "source_id": "browserless",
+                            "source_id": "[1]",
+                            "domain_name": bl_host or None,
                             "credibility_tier": 1,
                             "key_fact": reason,
                             "supports": outcome,
+                            "date_published": None,
                             "is_required_data_source": True,
                         }],
+                        "grounding_search_queries": [],
+                        "grounding_source_count": 1,
                         "confidence_score": 0.85,
                         "resolution_status": "RESOLVED",
+                        "pass_used": "browserless_bql",
                         "data_source_covered": True,
                         "data_source_domains_required": [d["domain"] for d in required_domains],
                         "strict_mode": True,
@@ -705,6 +711,7 @@ class CollectorBrowserless(CollectorSitePinned):
                             **bl_meta,
                         }
 
+                        retry_host = (urlparse(bl_url).netloc or "").lower().lstrip("www.")
                         return EvidenceItem(
                             evidence_id=evidence_id,
                             requirement_id=req_id,
@@ -724,14 +731,19 @@ class CollectorBrowserless(CollectorSitePinned):
                                 "reason": reason,
                                 "evidence_sources": [{
                                     "url": bl_url,
-                                    "source_id": "browserless",
+                                    "source_id": "[1]",
+                                    "domain_name": retry_host or None,
                                     "credibility_tier": 1,
                                     "key_fact": reason,
                                     "supports": outcome,
+                                    "date_published": None,
                                     "is_required_data_source": True,
                                 }],
+                                "grounding_search_queries": [],
+                                "grounding_source_count": 1,
                                 "confidence_score": 0.85,
                                 "resolution_status": "RESOLVED",
+                                "pass_used": "browserless_bql_retry",
                                 "data_source_covered": True,
                                 "data_source_domains_required": [
                                     d["domain"] for d in required_domains
@@ -777,8 +789,11 @@ class CollectorBrowserless(CollectorSitePinned):
                     "outcome": "Unresolved",
                     "reason": unresolved_reason,
                     "evidence_sources": [],
+                    "grounding_search_queries": [],
+                    "grounding_source_count": 0,
                     "confidence_score": 0.0,
                     "resolution_status": "UNRESOLVED",
+                    "pass_used": "browserless_bql",
                     "data_source_covered": False,
                     "data_source_domains_required": [d["domain"] for d in required_domains],
                     "serper_discovered_urls": [u["url"] for u in all_discovered_urls],
@@ -808,9 +823,13 @@ class CollectorBrowserless(CollectorSitePinned):
                     "outcome": "Unresolved",
                     "reason": crash_reason,
                     "evidence_sources": [],
+                    "grounding_search_queries": [],
+                    "grounding_source_count": 0,
                     "confidence_score": 0.0,
                     "resolution_status": "UNRESOLVED",
+                    "pass_used": "browserless_bql",
                     "data_source_covered": False,
+                    "data_source_domains_required": [],
                     "serper_discovered_urls": discovered_raw,
                 },
                 success=True,

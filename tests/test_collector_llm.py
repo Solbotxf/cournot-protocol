@@ -510,8 +510,8 @@ class TestHyDEExtractedFieldsConsistency:
         assert ef["resolution_status"] == "RESOLVED"
 
     @patch.object(CollectorHyDE, "_execute_search_queries", return_value=_FAKE_SEARCH_RESULTS)
-    def test_outcome_none_when_unverified(self, mock_search):
-        """When synthesis has no parsed_value, outcome should be None."""
+    def test_outcome_unresolved_when_unverified(self, mock_search):
+        """When synthesis has no parsed_value, outcome should be 'Unresolved'."""
         hypothesis_resp = _hyde_hypothesis_json()
         synthesis_resp = _hyde_synthesis_json(
             parsed_value=None,
@@ -529,5 +529,5 @@ class TestHyDEExtractedFieldsConsistency:
         item = bundle.items[0]
 
         ef = item.extracted_fields
-        assert ef["outcome"] is None
+        assert ef["outcome"] == "Unresolved"
         assert ef["resolution_status"] == "UNRESOLVED"

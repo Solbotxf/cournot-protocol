@@ -793,11 +793,15 @@ class CollectorWebPageReader(BaseAgent):
             evidence_sources = _normalize_evidence_sources(raw_sources)
 
             extracted_fields = {
+                # --- Canonical fields (same as CollectorOpenSearch) ---
                 "outcome": data.get("parsed_value"),
                 "reason": data.get("reasoning_trace", ""),
+                "evidence_sources": evidence_sources,
+                "grounding_search_queries": [],
+                "grounding_source_count": len(evidence_sources),
                 "confidence_score": data.get("confidence_score"),
                 "resolution_status": data.get("resolution_status"),
-                "evidence_sources": evidence_sources,
+                "data_source_domains_required": [],
             }
 
             # Determine success based on resolution_status
@@ -896,9 +900,15 @@ class CollectorWebPageReader(BaseAgent):
         evidence_id = self._generate_evidence_id(requirement_id, target)
         content_summary = parsed.get("content_summary", "")
         extracted = self._truncate_extracted_fields(parsed.get("extracted_fields", {}))
-        # Ensure outcome/reason are always present for auditor consistency
+        # Ensure canonical fields are always present for auditor consistency
         extracted.setdefault("outcome", parsed.get("parsed_value"))
         extracted.setdefault("reason", parsed.get("content_summary", ""))
+        extracted.setdefault("evidence_sources", [])
+        extracted.setdefault("grounding_search_queries", [])
+        extracted.setdefault("grounding_source_count", len(extracted.get("evidence_sources", [])))
+        extracted.setdefault("confidence_score", None)
+        extracted.setdefault("resolution_status", None)
+        extracted.setdefault("data_source_domains_required", [])
         success = parsed.get("success", True)
 
         return EvidenceItem(
@@ -1331,11 +1341,23 @@ class CollectorHyDE(BaseAgent):
             raw_outcome = str(data.get("parsed_value", "") or "")
             outcome = _normalize_hyde_outcome(raw_outcome, hypothesis_match)
 
+            # Determine resolution_status from hypothesis match
+            if outcome in ("Yes", "No"):
+                resolution_status = "RESOLVED"
+            else:
+                resolution_status = "UNRESOLVED"
+
             extracted_fields = {
+                # --- Canonical fields (same as CollectorOpenSearch) ---
                 "outcome": outcome,
                 "reason": data.get("reasoning_trace", ""),
-                "confidence_score": confidence_score,
                 "evidence_sources": evidence_sources,
+                "grounding_search_queries": [],
+                "grounding_source_count": len(evidence_sources),
+                "confidence_score": confidence_score,
+                "resolution_status": resolution_status,
+                "data_source_domains_required": [],
+                # --- HyDE-specific fields ---
                 "hypothesis_match": hypothesis_match,
                 "discrepancies": data.get("discrepancies", []),
                 "hypothetical_document": hypothetical_doc[:300],
@@ -2250,10 +2272,27 @@ class CollectorAgenticRAG(BaseAgent):
         raw_sources = synthesis.get("evidence_sources", synthesis.get("final_evidence", []))
         evidence_sources = _normalize_evidence_sources(raw_sources)
 
+        # Normalize outcome
+        raw_outcome = str(synthesis.get("parsed_value", "") or "")
+        outcome: str | None = None
+        if raw_outcome.lower() in ("yes", "true"):
+            outcome = "Yes"
+        elif raw_outcome.lower() in ("no", "false"):
+            outcome = "No"
+        else:
+            outcome = "Unresolved"
+
         extracted_fields = self._truncate_extracted_fields({
+            # --- Canonical fields (same as CollectorOpenSearch) ---
+            "outcome": outcome,
+            "reason": str(synthesis.get("reasoning_trace", ""))[:500],
+            "evidence_sources": evidence_sources,
+            "grounding_search_queries": [],
+            "grounding_source_count": len(evidence_sources),
             "confidence_score": confidence_score,
             "resolution_status": resolution_status,
-            "evidence_sources": evidence_sources,
+            "data_source_domains_required": [],
+            # --- Agentic RAG-specific fields ---
             "conflicts": synthesis.get("conflicts", []),
             "missing_info": synthesis.get("missing_info", []),
         })
@@ -3306,10 +3345,27 @@ class CollectorGraphRAG(BaseAgent):
 
         reasoning_trace = str(synthesis.get("reasoning_trace", ""))[:500]
 
+        # Normalize outcome
+        raw_outcome = str(synthesis.get("parsed_value", "") or "")
+        outcome: str | None = None
+        if raw_outcome.lower() in ("yes", "true"):
+            outcome = "Yes"
+        elif raw_outcome.lower() in ("no", "false"):
+            outcome = "No"
+        else:
+            outcome = "Unresolved"
+
         extracted_fields = self._truncate_extracted_fields({
+            # --- Canonical fields (same as CollectorOpenSearch) ---
+            "outcome": outcome,
+            "reason": reasoning_trace,
+            "evidence_sources": evidence_sources,
+            "grounding_search_queries": [],
+            "grounding_source_count": len(evidence_sources),
             "confidence_score": confidence_score,
             "resolution_status": resolution_status,
-            "evidence_sources": evidence_sources,
+            "data_source_domains_required": [],
+            # --- GraphRAG-specific fields ---
             "graph_stats": graph.stats,
             "top_entities": sorted(graph.entities.keys())[:10],
             "selected_communities": [c.id for c in graph.communities[:self.TOP_M_COMMUNITIES]],
@@ -3430,10 +3486,11 @@ class CollectorGraphRAG(BaseAgent):
 
 
 def _normalize_evidence_sources(raw_sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalize LLM-produced evidence source entries to the standard format.
+    """Normalize LLM-produced evidence source entries to the canonical format.
 
-    Standard format (matching EvidenceSource schema):
-        url, source_id, credibility_tier (int 1-3), key_fact, supports, date_published
+    Canonical format (matching CollectorOpenSearch output):
+        url, source_id, domain_name, credibility_tier (int 1-3),
+        key_fact, supports, date_published, is_required_data_source
 
     Handles variations across collector prompts:
         - credibility_tier as string ("Tier 1") or int (1)
@@ -3443,7 +3500,7 @@ def _normalize_evidence_sources(raw_sources: list[dict[str, Any]]) -> list[dict[
     _TIER_MAP = {"tier 1": 1, "tier 2": 2, "tier 3": 3}
     normalized: list[dict[str, Any]] = []
 
-    for src in raw_sources:
+    for idx, src in enumerate(raw_sources):
         if not isinstance(src, dict):
             continue
 
@@ -3466,13 +3523,22 @@ def _normalize_evidence_sources(raw_sources: list[dict[str, Any]]) -> list[dict[
         # key_fact fallback to relevance_reason
         key_fact = src.get("key_fact", src.get("relevance_reason", ""))
 
+        # Extract domain_name from URL if not provided
+        url = src.get("url", "")
+        domain_name = src.get("domain_name")
+        if not domain_name and url:
+            parsed = urlparse(url)
+            domain_name = (parsed.netloc or "").lower().lstrip("www.") or None
+
         normalized.append({
-            "url": src.get("url", ""),
-            "source_id": src.get("source_id"),
+            "url": url,
+            "source_id": src.get("source_id") or f"[{idx + 1}]",
+            "domain_name": domain_name,
             "credibility_tier": tier,
             "key_fact": str(key_fact)[:300] if key_fact else "",
             "supports": supports,
             "date_published": src.get("date_published"),
+            "is_required_data_source": src.get("is_required_data_source", False),
         })
 
     return normalized

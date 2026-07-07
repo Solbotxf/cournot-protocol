@@ -888,6 +888,7 @@ class CollectorSitePinned(CollectorOpenSearch):
                     **ext_meta,
                 }
 
+                ext_host = (urlparse(ext_url).netloc or "").lower().lstrip("www.") if ext_url.startswith("http") else source_id
                 return EvidenceItem(
                     evidence_id=evidence_id,
                     requirement_id=req_id,
@@ -905,14 +906,19 @@ class CollectorSitePinned(CollectorOpenSearch):
                         "reason": reason,
                         "evidence_sources": [{
                             "url": ext_url,
-                            "source_id": f"{source_id}.com",
+                            "source_id": f"[1]",
+                            "domain_name": ext_host or None,
                             "credibility_tier": 1,
                             "key_fact": reason,
                             "supports": outcome,
+                            "date_published": None,
                             "is_required_data_source": True,
                         }],
+                        "grounding_search_queries": [],
+                        "grounding_source_count": 1,
                         "confidence_score": 0.90,
                         "resolution_status": "RESOLVED",
+                        "pass_used": f"{source_id}_direct_extraction",
                         "data_source_covered": True,
                         "data_source_domains_required": [d["domain"] for d in required_domains],
                         "strict_mode": True,
@@ -944,6 +950,7 @@ class CollectorSitePinned(CollectorOpenSearch):
                     **jina_meta,
                 }
 
+                jina_host = (urlparse(jina_url).netloc or "").lower().lstrip("www.")
                 return EvidenceItem(
                     evidence_id=evidence_id,
                     requirement_id=req_id,
@@ -961,14 +968,19 @@ class CollectorSitePinned(CollectorOpenSearch):
                         "reason": reason,
                         "evidence_sources": [{
                             "url": jina_url,
-                            "source_id": "jina_reader",
+                            "source_id": "[1]",
+                            "domain_name": jina_host or None,
                             "credibility_tier": 1,
                             "key_fact": reason,
                             "supports": outcome,
+                            "date_published": None,
                             "is_required_data_source": True,
                         }],
+                        "grounding_search_queries": [],
+                        "grounding_source_count": 1,
                         "confidence_score": 0.85,
                         "resolution_status": "RESOLVED",
+                        "pass_used": "jina_reader_fallback",
                         "data_source_covered": True,
                         "data_source_domains_required": [d["domain"] for d in required_domains],
                         "strict_mode": True,
@@ -1168,9 +1180,11 @@ class CollectorSitePinned(CollectorOpenSearch):
                         "outcome": "Unresolved",
                         "reason": unresolved_reason,
                         "evidence_sources": url_evidence_sources,
+                        "grounding_search_queries": list(dict.fromkeys(all_search_queries)),
                         "grounding_source_count": len(url_evidence_sources),
                         "confidence_score": 0.0,
                         "resolution_status": "UNRESOLVED",
+                        "pass_used": "source_pinned_unresolved",
                         "data_source_domains_required": [
                             d["domain"] for d in required_domains
                         ],
@@ -1303,6 +1317,7 @@ class CollectorSitePinned(CollectorOpenSearch):
                     "grounding_source_count": len(evidence_sources),
                     "confidence_score": confidence_score,
                     "resolution_status": resolution_status,
+                    "pass_used": "source_pinned_phase2",
                     "data_source_domains_required": [d["domain"] for d in required_domains],
                     "data_source_covered": best_sources_covered,
                     "attempts_made": attempts_made,
@@ -1356,9 +1371,11 @@ class CollectorSitePinned(CollectorOpenSearch):
                     "outcome": "Unresolved",
                     "reason": crash_reason,
                     "evidence_sources": crash_url_sources,
+                    "grounding_search_queries": [],
                     "grounding_source_count": len(crash_url_sources),
                     "confidence_score": 0.0,
                     "resolution_status": "UNRESOLVED",
+                    "pass_used": "source_pinned_error",
                     "data_source_domains_required": [
                         d["domain"] for d in required_domains
                     ],

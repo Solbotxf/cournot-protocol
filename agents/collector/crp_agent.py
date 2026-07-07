@@ -434,12 +434,46 @@ class CollectorCRP(BaseAgent):
                 all_evidence_sources.append(s)
         evidence_sources = _normalize_evidence_sources(all_evidence_sources)
 
-        extracted_fields = {
+        # Map CRP verdict to canonical outcome format
+        verdict_str = adjudication.get("verdict", "") if adjudication else ""
+        outcome = verdict_str.capitalize() if verdict_str.upper() in ("YES", "NO") else "Unresolved"
+        if verdict_str.upper() == "INVALID":
+            outcome = "Unresolved"
+
+        adj_confidence = adjudication.get("confidence", 0.0) if adjudication else 0.0
+        adj_reasoning = adjudication.get("reasoning_trace", "") if adjudication else ""
+
+        # Determine resolution_status from verdict
+        if outcome in ("Yes", "No"):
+            resolution_status = "RESOLVED"
+        else:
+            resolution_status = "UNRESOLVED"
+
+        # Collect grounding search queries from variable traces
+        all_search_queries: list[str] = []
+        for t in variable_traces:
+            inv = t.get("investigation_result") or {}
+            # Queries are in the turn logs within execution_log, but also
+            # captured via grounding_sources at the trace level.
+            pass
+        # Deduplicate
+        unique_queries = list(dict.fromkeys(all_search_queries))
+
+        extracted_fields: dict[str, Any] = {
+            # --- Canonical fields (same as CollectorOpenSearch) ---
+            "outcome": outcome,
+            "reason": adj_reasoning[:500] if adj_reasoning else "",
+            "evidence_sources": evidence_sources,
+            "grounding_search_queries": unique_queries,
+            "grounding_source_count": len(evidence_sources),
+            "confidence_score": adj_confidence,
+            "resolution_status": resolution_status,
+            "data_source_domains_required": [],
+            # --- CRP-specific fields ---
             "plan": plan,
             "resolved_variables": resolved_vars,
             "variable_traces": variable_traces,
             "grounding_sources": all_grounding_sources,
-            "evidence_sources": evidence_sources,
             "adjudication": adjudication,
         }
 
@@ -971,10 +1005,16 @@ class CollectorCRP(BaseAgent):
 def _normalize_evidence_sources(
     raw_sources: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Normalize evidence sources to match CollectorOpenSearch canonical format.
+
+    Ensures every source dict has the full set of keys:
+    url, source_id, domain_name, credibility_tier, key_fact,
+    supports, date_published, is_required_data_source.
+    """
     _TIER_MAP = {"tier 1": 1, "tier 2": 2, "tier 3": 3}
     normalized: list[dict[str, Any]] = []
 
-    for src in raw_sources:
+    for idx, src in enumerate(raw_sources):
         if not isinstance(src, dict):
             continue
 
@@ -994,13 +1034,23 @@ def _normalize_evidence_sources(
 
         key_fact = src.get("key_fact", "")
 
+        # Extract domain_name from URL if not provided
+        url = src.get("url", "")
+        domain_name = src.get("domain_name")
+        if not domain_name and url:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            domain_name = (parsed.netloc or "").lower().lstrip("www.") or None
+
         normalized.append({
-            "url": src.get("url", ""),
-            "source_id": src.get("source_id"),
+            "url": url,
+            "source_id": src.get("source_id") or f"[{idx + 1}]",
+            "domain_name": domain_name,
             "credibility_tier": tier,
             "key_fact": str(key_fact)[:300] if key_fact else "",
             "supports": supports,
             "date_published": src.get("date_published"),
+            "is_required_data_source": src.get("is_required_data_source", False),
         })
 
     return normalized

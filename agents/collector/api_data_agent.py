@@ -236,6 +236,8 @@ class CollectorAPIData(BaseAgent):
         interpretation = self._llm_interpret_response(
             ctx, description, provider, result
         )
+        interp_text = ""
+        interp_confidence = 0.0
         if interpretation is not None:
             result.extracted_fields["interpretation"] = interpretation.get(
                 "interpretation"
@@ -243,16 +245,53 @@ class CollectorAPIData(BaseAgent):
             result.extracted_fields["interpretation_confidence"] = (
                 interpretation.get("confidence")
             )
+            interp_text = interpretation.get("interpretation", "")
+            interp_confidence = interpretation.get("confidence", 0.0)
             relevant = interpretation.get("relevant_data")
             if relevant and isinstance(relevant, dict):
                 result.extracted_fields["relevant_data"] = relevant
+
+        # Build canonical extracted_fields with provider-specific data nested
+        provider_fields = dict(result.extracted_fields)
+        source_uri = result.source_uri or "n/a"
+
+        # Parse domain from source_uri for evidence_sources
+        api_domain = None
+        if source_uri.startswith("http"):
+            from urllib.parse import urlparse as _urlparse
+            api_domain = (_urlparse(source_uri).netloc or "").lower().lstrip("www.") or None
+
+        canonical_fields: dict[str, Any] = {
+            # --- Canonical fields (same as CollectorOpenSearch) ---
+            "outcome": "Unresolved",  # API data doesn't resolve markets directly
+            "reason": interp_text or f"Data fetched from {provider.display_name}",
+            "evidence_sources": [{
+                "url": source_uri,
+                "source_id": "[1]",
+                "domain_name": api_domain or provider.display_name,
+                "credibility_tier": 1,
+                "key_fact": interp_text[:300] if interp_text else f"API data from {provider.display_name}",
+                "supports": "N/A",
+                "date_published": None,
+                "is_required_data_source": True,
+            }],
+            "grounding_search_queries": [],
+            "grounding_source_count": 1,
+            "confidence_score": interp_confidence if interp_confidence else (0.8 if result.success else 0.0),
+            "resolution_status": "RESOLVED" if result.success else "UNRESOLVED",
+            "pass_used": f"api_data:{provider.provider_id}",
+            "data_source_domains_required": provider.domains[:5] if hasattr(provider, 'domains') else [],
+            # --- Provider-specific fields ---
+            "api_provider": provider.provider_id,
+            "api_data": provider_fields,
+        }
 
         evidence = EvidenceItem(
             evidence_id=f"apidata_{req_id}_{uuid.uuid4().hex[:8]}",
             requirement_id=req_id,
             provenance=Provenance(
                 source_id=provider.provider_id,
-                source_uri=result.source_uri or "n/a",
+                source_uri=source_uri,
                 tier=3,
                 fetched_at=ctx.now(),
                 content_hash=(
@@ -267,7 +306,7 @@ class CollectorAPIData(BaseAgent):
             success=result.success,
             error=result.error,
             status_code=result.status_code,
-            extracted_fields=result.extracted_fields,
+            extracted_fields=canonical_fields,
         )
 
         call_record.ended_at = ctx.now().isoformat()
