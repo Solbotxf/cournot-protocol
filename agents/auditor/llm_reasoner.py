@@ -570,7 +570,11 @@ class LLMReasoner:
         outcome = data.get("preliminary_outcome", "UNCERTAIN")
         valid_outcomes = set(prompt_spec.possible_outcomes) | {"INVALID", "UNCERTAIN"}
         if outcome not in valid_outcomes:
-            outcome = "UNCERTAIN"
+            # Check if it's a comma-separated tie outcome (e.g. "A,B,C,D,E")
+            if prompt_spec.market.is_valid_outcome(outcome):
+                pass  # Accept comma-separated tie outcomes
+            else:
+                outcome = "UNCERTAIN"
         
         # Build trace
         trace = ReasoningTrace(

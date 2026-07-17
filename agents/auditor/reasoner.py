@@ -317,6 +317,14 @@ class RuleBasedReasoner:
         """Extract the primary value from an evidence item."""
         # Check extracted fields first
         if item.extracted_fields:
+            # For multi-choice markets, check outcome/answer fields first
+            if prompt_spec.is_multi_choice:
+                for key in ["outcome", "agent_predicted_outcome", "answer", "result"]:
+                    if key in item.extracted_fields:
+                        val = item.extracted_fields[key]
+                        if val is not None:
+                            return str(val)
+
             # Direct price fields
             for key in ["price_usd", "usd", "price", "amount", "value"]:
                 if key in item.extracted_fields:
@@ -325,7 +333,7 @@ class RuleBasedReasoner:
                         return float(val) if val is not None else None
                     except (ValueError, TypeError):
                         pass
-            
+
             # Nested fields (e.g., bitcoin_usd)
             for key, val in item.extracted_fields.items():
                 if isinstance(val, (int, float)):
@@ -336,7 +344,7 @@ class RuleBasedReasoner:
                     nested_price = self._find_price_in_dict(val)
                     if nested_price is not None:
                         return nested_price
-        
+
         # Check parsed value
         if item.parsed_value is not None:
             if isinstance(item.parsed_value, (int, float)):
@@ -344,7 +352,7 @@ class RuleBasedReasoner:
             if isinstance(item.parsed_value, dict):
                 # Try to find price in nested dict
                 return self._find_price_in_dict(item.parsed_value)
-        
+
         return None
     
     def _find_price_in_dict(self, d: dict, depth: int = 0) -> float | None:
@@ -371,7 +379,8 @@ class RuleBasedReasoner:
     def _get_primary_field(self, item: EvidenceItem) -> str | None:
         """Get the name of the primary field used."""
         if item.extracted_fields:
-            for key in ["price_usd", "usd", "price", "amount", "value"]:
+            for key in ["outcome", "agent_predicted_outcome", "answer", "result",
+                        "price_usd", "usd", "price", "amount", "value"]:
                 if key in item.extracted_fields:
                     return key
         return None
@@ -535,6 +544,10 @@ class RuleBasedReasoner:
 
         Uses case-insensitive string matching. Returns the first matching
         outcome or None if no match is found.
+
+        Supports comma-separated tie outcomes (e.g. "A,B,C,D,E") where
+        every component is a valid outcome — returns the normalized
+        comma-separated string preserving original casing from possible_outcomes.
         """
         if value is None:
             return None
@@ -545,6 +558,15 @@ class RuleBasedReasoner:
         for outcome in possible_outcomes:
             if outcome.lower() == value_str:
                 return outcome
+
+        # Comma-separated tie: check if every part is a valid outcome
+        if "," in value_str:
+            parts = [p.strip() for p in value_str.split(",") if p.strip()]
+            if len(parts) > 1:
+                outcome_lower_map = {o.lower(): o for o in possible_outcomes}
+                matched = [outcome_lower_map[p] for p in parts if p in outcome_lower_map]
+                if len(matched) == len(parts):
+                    return ",".join(matched)
 
         # Substring match: check if any outcome appears in the value
         for outcome in possible_outcomes:

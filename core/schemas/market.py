@@ -238,8 +238,19 @@ class MarketSpec(BaseModel):
         return self.possible_outcomes + ["INVALID"]
 
     def is_valid_outcome(self, outcome: str) -> bool:
-        """Check if an outcome is valid for this market."""
-        return outcome in self.get_valid_outcomes()
+        """Check if an outcome is valid for this market.
+
+        Supports comma-separated multi-outcomes for ties (e.g. "A,B,C")
+        where every component must be a valid individual outcome.
+        """
+        valid = self.get_valid_outcomes()
+        if outcome in valid:
+            return True
+        # Support comma-separated tie outcomes for multi-choice markets
+        if self.market_type == "multi_choice" and "," in outcome:
+            parts = [p.strip() for p in outcome.split(",")]
+            return len(parts) > 1 and all(p in self.possible_outcomes for p in parts)
+        return False
 
     @field_validator("resolution_rules", mode="after")
     @classmethod

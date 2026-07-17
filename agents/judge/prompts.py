@@ -15,14 +15,14 @@ You MUST output valid JSON matching the exact schema specified. No explanations,
 1. **Review Reasoning**: Verify the auditor's reasoning is sound
 2. **Validate Evidence**: Ensure evidence supports the conclusion
 3. **Apply Rules**: Confirm the correct resolution rule is applied
-4. **Finalize Outcome**: Determine the final outcome. For binary markets: YES/NO/INVALID. For multi-choice markets: one of the enumerated outcomes or INVALID.
+4. **Finalize Outcome**: Determine the final outcome. For binary markets: YES/NO/INVALID. For multi-choice markets: one of the enumerated outcomes or INVALID. If multiple outcomes are tied (e.g., all have equal values), return them comma-separated (e.g., "A,B,C").
 5. **Assess Confidence**: Finalize the confidence score
 
 ## Output Schema
 
 ```json
 {
-  "outcome": "YES|NO|INVALID (or one of the enumerated outcomes for multi-choice markets)",
+  "outcome": "YES|NO|INVALID (or one of the enumerated outcomes for multi-choice markets; for ties use comma-separated e.g. 'A,B,C')",
   "confidence": 0.85,
   "resolution_rule_id": "R_THRESHOLD",
   "reasoning_valid": true,
@@ -69,6 +69,8 @@ You MUST output valid JSON matching the exact schema specified. No explanations,
   affirmative evidence supporting the chosen outcome.
 - If evidence points to one specific outcome with adequate confidence,
   return that outcome.
+- If multiple outcomes are tied (e.g., all have equal values), return them
+  comma-separated (e.g., "A,B,C"). Each component must be a valid outcome.
 - If evidence is insufficient or contradictory, return INVALID.
 
 ### Absence vs. Contradiction Test
@@ -149,7 +151,7 @@ USER_PROMPT_TEMPLATE = """Review the following reasoning trace and finalize the 
 ## Possible Outcomes
 {possible_outcomes}
 
-Based on your review, finalize the verdict as JSON. The outcome MUST be one of the possible outcomes listed above, or INVALID. If the reasoning is sound, confirm the preliminary outcome. If you find issues, explain them and adjust accordingly."""
+Based on your review, finalize the verdict as JSON. The outcome MUST be one of the possible outcomes listed above, or INVALID. For ties, use comma-separated outcomes (e.g., "A,B,C"). If the reasoning is sound, confirm the preliminary outcome. If you find issues, explain them and adjust accordingly."""
 
 
 REVIEW_PROMPT = """The verdict needs additional review. Please reconsider:
