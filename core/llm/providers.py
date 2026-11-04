@@ -230,7 +230,7 @@ class GoogleProvider(LLMProvider):
 
     def __init__(
         self,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.5-flash-lite",
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
@@ -512,7 +512,7 @@ def create_provider(
     elif provider_name == "anthropic":
         return AnthropicProvider(model=model or "claude-sonnet-4-20250514", proxy=proxy, **kwargs)
     elif provider_name == "google":
-        return GoogleProvider(model=model or "gemini-2.5-flash", proxy=proxy, **kwargs)
+        return GoogleProvider(model=model or "gemini-3.5-flash-lite", proxy=proxy, **kwargs)
     elif provider_name == "grok":
         return GrokProvider(model=model or "grok-4-latest", proxy=proxy, **kwargs)
     elif provider_name == "mock":

@@ -304,7 +304,7 @@ class CollectorOpenSearch(BaseAgent):
     def __init__(
         self,
         *,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.5-flash-lite",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)

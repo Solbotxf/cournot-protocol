@@ -284,7 +284,7 @@ class CollectorSitePinned(CollectorOpenSearch):
     def __init__(
         self,
         *,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.5-flash-lite",
         max_attempts: int = 3,
         serper_max_urls: int = _SERPER_MAX_URLS,
         **kwargs: Any,

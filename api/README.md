@@ -160,7 +160,7 @@ Discover available agents and configured LLM providers. Only providers with API 
   "providers": [
     { "provider": "openai", "default_model": "gpt-4o" },
     { "provider": "anthropic", "default_model": "claude-sonnet-4-20250514" },
-    { "provider": "google", "default_model": "gemini-2.5-flash" },
+    { "provider": "google", "default_model": "gemini-3.5-flash-lite" },
     { "provider": "grok", "default_model": "grok-3" }
   ],
   "steps": [

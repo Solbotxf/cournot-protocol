@@ -778,7 +778,7 @@ async def run_collect(request: CollectRequest) -> CollectResponse:
         crp_ctx = None
         if "CollectorCRP" in request.collectors:
             crp_override = build_llm_override(
-                "google", "gemini-2.5-flash", agent_name="collector",
+                "google", "gemini-3.5-flash-lite", agent_name="collector",
             )
             crp_ctx = get_agent_context(with_llm=True, with_http=True, llm_override=crp_override)
 

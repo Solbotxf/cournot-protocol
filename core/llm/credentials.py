@@ -44,7 +44,7 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "openai": "gpt-4o",
     "anthropic": "claude-sonnet-4-20250514",
-    "google": "gemini-2.5-flash",
+    "google": "gemini-3.5-flash-lite",
     "grok": "grok-4-fast",
 }
 

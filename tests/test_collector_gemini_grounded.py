@@ -285,7 +285,7 @@ class TestCollectorOpenSearch:
         result, _ = self._run_with_mock(resp)
 
         assert result.metadata["collector"] == "open_search"
-        assert result.metadata["model"] == "gemini-2.5-flash"
+        assert result.metadata["model"] == "gemini-3.5-flash-lite"
 
     def test_no_api_key_returns_failure(self):
         agent = CollectorOpenSearch()

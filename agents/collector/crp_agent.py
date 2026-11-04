@@ -215,7 +215,7 @@ class CollectorCRP(BaseAgent):
     _version = "v4"
     _capabilities = {AgentCapability.LLM, AgentCapability.NETWORK}
     MAX_RETRIES = 2
-    DEFAULT_MODEL = "gemini-2.5-flash"
+    DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
     def run(
         self,
